@@ -4,7 +4,8 @@ SendScore's engine and CLI (Go, MIT). The hosted app lives in sendscore/sendscor
 
 - `verdict/`: the JSON contract (`sendscore.verdict/v1`). Never rename or repurpose a field within a schema version: add a field, or bump `Schema`.
 - `engine/`: one file per category of checks (`auth.go`, `unsub.go`, `structure.go`, `content.go`, `links.go`), `compare.go` for issue to issue changes, and `rollup.go` for the overall verdict, ready_to_send, top fixes, and summary.
-- `cmd/`: the cobra CLI (`check`, `diff`). Exit codes 0, 1, 2, and 64, as in Preflight.
+- `mcpserver/`: the MCP tools, over a `Backend` interface. `HTTPBackend` calls an app's JSON API (used by `sendscore mcp`); the app serves the same tools over its database at `/api/mcp`.
+- `cmd/`: the cobra CLI (`check`, `diff`, `mcp`). Exit codes 0, 1, 2, and 64, as in Preflight.
 
 Rules:
 

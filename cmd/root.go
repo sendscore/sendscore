@@ -47,7 +47,7 @@ It reports what the message proves. It never claims inbox placement.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(newCheck(), newDiff())
+	root.AddCommand(newCheck(), newDiff(), newMCP())
 	return root
 }
 

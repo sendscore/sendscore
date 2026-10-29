@@ -42,6 +42,18 @@ Other flags:
 
 Exit codes: `0` every check passed, `1` warnings only, `2` a check failed, `64` usage error. `diff` exits `1` when a change made a check worse.
 
+## MCP
+
+`sendscore mcp` runs SendScore's MCP tools over stdio for Claude Code, Claude Desktop, or any MCP client:
+
+```sh
+claude mcp add sendscore -- sendscore mcp
+```
+
+The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare_to_previous`. They call a SendScore app's API: `SENDSCORE_URL` (default `https://app.sendscore.ai`, or your own instance) and `SENDSCORE_TOKEN` when the app requires one. The hosted app also serves the same tools as a remote connector at `https://app.sendscore.ai/api/mcp`.
+
+An agent's loop: get a test address, send the issue's preview to it from the email platform, wait for the verdict, and fix what `top_fixes` lists before scheduling.
+
 ## What it checks
 
 | Category | Checks |
