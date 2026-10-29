@@ -51,6 +51,9 @@ type Options struct {
 	// Blocking lists the categories whose failures make ready_to_send
 	// false. Nil means authentication and unsubscribe.
 	Blocking []verdict.Category
+	// Blocklists are the domain blocklists content.blocklists looks link
+	// domains up on. Empty means the check is skipped.
+	Blocklists []Blocklist
 }
 
 // ErrOffline is what an offline resolver returns. Checks that see it are

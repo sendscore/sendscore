@@ -1,13 +1,18 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
+
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/sendscore/sendscore/verdict"
 )
@@ -18,9 +23,13 @@ import (
 // know a filter's decision.
 
 const (
-	subjectCutoff   = 70 // characters a phone inbox typically shows
-	imageOnlyChars  = 300
-	maxBlocklistDNS = 30
+	subjectCutoff          = 70 // characters a phone inbox typically shows
+	imageOnlyOneChars      = 60
+	imageOnlyManyChars     = 200
+	maxBlocklistDomains    = 100
+	blocklistConcurrency   = 8
+	blocklistLookupTimeout = 4 * time.Second
+	blocklistDeadline      = 20 * time.Second
 )
 
 // URL shorteners hide where a link goes, which filters treat with suspicion.
@@ -40,7 +49,6 @@ var boilerplateOpeners = []string{
 func (r *run) checkSubject() {
 	subj := strings.TrimSpace(r.msg.get("Subject"))
 	n := len([]rune(subj))
-	var issues []string
 	if subj == "" {
 		r.add(verdict.Check{
 			ID: "content.subject", Category: verdict.Content, Status: verdict.Fail,
@@ -49,8 +57,10 @@ func (r *run) checkSubject() {
 		})
 		return
 	}
+	// Each issue completes the sentence "The subject line ...".
+	var issues []string
 	if n > subjectCutoff {
-		issues = append(issues, fmt.Sprintf("%d characters, so phones cut it off after about %d", n, subjectCutoff))
+		issues = append(issues, fmt.Sprintf("runs %d characters, past the %d a phone shows", n, subjectCutoff))
 	}
 	letters, upper := 0, 0
 	for _, c := range subj {
@@ -62,10 +72,10 @@ func (r *run) checkSubject() {
 		}
 	}
 	if letters >= 10 && upper*10 >= letters*8 {
-		issues = append(issues, "written in capitals")
+		issues = append(issues, "is written in capitals")
 	}
-	if strings.Count(subj, "!") >= 2 {
-		issues = append(issues, fmt.Sprintf("%d exclamation marks", strings.Count(subj, "!")))
+	if bangs := strings.Count(subj, "!"); bangs >= 2 {
+		issues = append(issues, fmt.Sprintf("has %d exclamation marks", bangs))
 	}
 	ev := map[string]any{"subject": subj, "characters": n}
 	if len(issues) == 0 {
@@ -75,10 +85,26 @@ func (r *run) checkSubject() {
 	ev["issues"] = issues
 	r.add(verdict.Check{
 		ID: "content.subject", Category: verdict.Content, Status: verdict.Warn,
-		Title:    "The subject line is " + strings.Join(issues, ", and "),
+		Title:    "The subject line " + joinAnd(issues),
 		Evidence: ev,
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Shorten the subject, use sentence case, and keep to one exclamation mark at most."},
 	})
+}
+
+// joinAnd joins phrases as "a", "a and b", or "a, b, and c".
+func joinAnd(items []string) string { return joinList(items, "and") }
+
+// joinList joins phrases with a conjunction and the serial comma.
+func joinList(items []string, conj string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " " + conj + " " + items[1]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + ", " + conj + " " + items[len(items)-1]
 }
 
 // checkPreheader looks at what an inbox shows next to the subject: the
@@ -127,7 +153,11 @@ func (r *run) checkImageOnly() {
 		}
 	}
 	ev := map[string]any{"text_characters": chars, "images": content}
-	if content > 0 && chars < imageOnlyChars {
+	// Image-only means almost no words around the pictures: a single image
+	// with next to no text, or several images with only a line or two. A
+	// photo with a paragraph under it is an ordinary newsletter.
+	imageOnly := (content == 1 && chars < imageOnlyOneChars) || (content >= 2 && chars < imageOnlyManyChars)
+	if imageOnly {
 		r.add(verdict.Check{
 			ID: "content.text_ratio", Category: verdict.Content, Status: verdict.Warn,
 			Title:    fmt.Sprintf("Mostly images, with %s and only %d characters of text", plural(content, "image"), chars),
@@ -160,9 +190,29 @@ func (r *run) checkShorteners() {
 	})
 }
 
-// checkLinkTextMismatch flags a link whose visible text is a web address on
-// one domain while the link goes to another. Click tracking sends every link
-// through one domain, so links to the issue's most common host are allowed.
+// Click tracking hosts of common email platforms. Their links name the real
+// destination in the text and go through the tracker, which is expected.
+var trackingSuffixes = []string{
+	"list-manage.com", "mcusercontent.com", "convertkit-mail.com", "convertkit-mail2.com",
+	"ck.page", "kit.com", "beehiiv.com", "mlsend.com", "mailerlite.com", "sendgrid.net",
+	"mailgun.org", "rs6.net", "hubspotlinks.com", "substack.com", "buttondown.email",
+	"ghost.io", "klclick.com", "klclick1.com", "ct.sendgrid.net", "awstrack.me",
+}
+
+func isTracker(host string) bool {
+	for _, t := range trackingSuffixes {
+		if host == t || strings.HasSuffix(host, "."+t) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkLinkTextMismatch flags a link whose own text is a web address on one
+// domain while the link goes to another. Links through a known click
+// tracking host are allowed, and so are links through the issue's own
+// tracking domain, recognised as the one domain carrying at least three
+// links and more than half of them. Both rules are deterministic.
 func (r *run) checkLinkTextMismatch() {
 	counts := map[string]int{}
 	for _, l := range r.parsed.Links {
@@ -170,26 +220,23 @@ func (r *run) checkLinkTextMismatch() {
 			counts[orgDomain(h)]++
 		}
 	}
-	tracker, best := "", 0
+	tracker := ""
 	for h, n := range counts {
-		if n > best {
-			tracker, best = h, n
+		if n >= 3 && n*2 > len(r.parsed.Links) {
+			tracker = h // at most one domain can hold more than half
 		}
-	}
-	if best*2 < len(r.parsed.Links) {
-		tracker = ""
 	}
 	var bad []map[string]string
 	for _, l := range r.parsed.Links {
-		shown := looksLikeDomain(l.Text)
+		shown := looksLikeDomain(l.Words)
 		target := linkHost(l.Href)
 		if shown == "" || target == "" {
 			continue
 		}
-		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker {
+		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker || isTracker(target) {
 			continue
 		}
-		bad = append(bad, map[string]string{"text": l.Text, "href": l.Href})
+		bad = append(bad, map[string]string{"text": l.Words, "href": l.Href})
 	}
 	if len(bad) == 0 {
 		r.add(verdict.Check{ID: "content.link_text", Category: verdict.Content, Status: verdict.Pass, Title: "Links go where their text says"})
@@ -222,38 +269,26 @@ func (r *run) checkActiveContent() {
 	})
 }
 
-// Domain blocklists queried over DNS. A listing answers with an address in
-// the list's range; some answers mean the query itself was refused, which
-// Spamhaus does for queries through large public resolvers.
-var blocklists = []struct {
-	name, zone string
-	listed     func(ip net.IP) bool
-	refused    func(ip net.IP) bool
-}{
-	{
-		name: "Spamhaus DBL", zone: "dbl.spamhaus.org",
-		listed:  func(ip net.IP) bool { v := ip.To4(); return v != nil && v[0] == 127 && v[1] == 0 && v[2] == 1 },
-		refused: func(ip net.IP) bool { v := ip.To4(); return v != nil && v[0] == 127 && v[1] == 255 && v[2] == 255 },
-	},
-	{
-		name: "SURBL", zone: "multi.surbl.org",
-		listed: func(ip net.IP) bool {
-			v := ip.To4()
-			return v != nil && v[0] == 127 && v[1] == 0 && v[2] == 0 && v[3] > 1
-		},
-		refused: func(ip net.IP) bool { v := ip.To4(); return v != nil && v.Equal(net.IPv4(127, 0, 0, 1).To4()) },
-	},
-}
-
+// checkBlocklists looks the domains of every link and image up on the
+// configured domain blocklists. It only passes when every list answered for
+// every domain, and it proves each list answers by looking up the list's
+// own test domain first. Nothing is looked up unless lists are configured:
+// the free public zones are for non-commercial use only.
 func (r *run) checkBlocklists() {
+	lists := r.opts.Blocklists
+	if len(lists) == 0 {
+		r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up",
+			"Blocklist lookups are off. Set a Spamhaus DQS key, or turn on the free public lists for non-commercial use."))
+		return
+	}
 	var domains []string
 	for _, l := range r.parsed.Links {
-		if h := linkHost(l.Href); h != "" {
+		if h := linkHost(l.Href); h != "" && net.ParseIP(h) == nil {
 			domains = appendUnique(domains, orgDomain(h))
 		}
 	}
 	for _, im := range r.parsed.Images {
-		if h := linkHost(im.Src); h != "" {
+		if h := linkHost(im.Src); h != "" && net.ParseIP(h) == nil {
 			domains = appendUnique(domains, orgDomain(h))
 		}
 	}
@@ -262,47 +297,82 @@ func (r *run) checkBlocklists() {
 		r.add(verdict.Check{ID: "content.blocklists", Category: verdict.Content, Status: verdict.Info, Title: "No link domains to look up"})
 		return
 	}
-	if len(domains) > maxBlocklistDNS {
-		domains = domains[:maxBlocklistDNS]
+	var unchecked []string
+	if len(domains) > maxBlocklistDomains {
+		unchecked = domains[maxBlocklistDomains:]
+		domains = domains[:maxBlocklistDomains]
+	}
+
+	ctx, cancel := context.WithTimeout(r.ctx, blocklistDeadline)
+	defer cancel()
+
+	type job struct {
+		list   Blocklist
+		domain string
+		test   bool
+	}
+	var jobs []job
+	for _, bl := range lists {
+		jobs = append(jobs, job{list: bl, domain: bl.TestDomain, test: true})
+		for _, d := range domains {
+			jobs = append(jobs, job{list: bl, domain: d})
+		}
+	}
+	results := make([]blResult, len(jobs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, blocklistConcurrency)
+	for i, j := range jobs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			results[i] = r.queryBlocklist(ctx, j.list, j.domain)
+		}()
+	}
+	wg.Wait()
+
+	if errors.Is(r.ctx.Err(), context.Canceled) {
+		r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up", "The check was cancelled."))
+		return
 	}
 
 	var listed []map[string]string
-	refused := map[string]bool{}
-	answered := 0
-	for _, d := range domains {
-		for _, bl := range blocklists {
-			addrs, err := r.res.LookupIPAddr(r.ctx, d+"."+bl.zone)
-			if err != nil {
-				if errors.Is(err, ErrOffline) {
-					r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up", "Offline: DNS lookups are disabled."))
-					return
-				}
-				if lookupFailed(err) == "" {
-					answered++ // not listed
-				}
-				continue
-			}
-			for _, a := range addrs {
-				switch {
-				case bl.refused(a.IP):
-					refused[bl.name] = true
-				case bl.listed(a.IP):
-					listed = append(listed, map[string]string{"domain": d, "list": bl.name, "answer": a.IP.String()})
-					answered++
-				}
-			}
+	var problems []string
+	for i, j := range jobs {
+		res := results[i]
+		switch {
+		case res.offline:
+			r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up", "Offline: DNS lookups are disabled."))
+			return
+		case j.test && res.state != blListed:
+			problems = appendUnique(problems, j.list.Name+" did not answer its test lookup ("+res.describe()+")")
+		case !j.test && res.state == blListed:
+			listed = append(listed, map[string]string{"domain": j.domain, "list": j.list.Name, "answer": res.answer})
+		case !j.test && res.state != blClear:
+			problems = appendUnique(problems, j.list.Name+" could not check "+j.domain+" ("+res.describe()+")")
 		}
 	}
-	ev := map[string]any{"domains": domains, "lists": []string{"Spamhaus DBL", "SURBL"}}
+	names := make([]string, 0, len(lists))
+	for _, bl := range lists {
+		names = append(names, bl.Name)
+	}
+	ev := map[string]any{"domains": domains, "lists": names}
+	if len(unchecked) > 0 {
+		ev["not_checked"] = unchecked
+	}
+	if len(problems) > 0 {
+		ev["problems"] = problems
+	}
 	if len(listed) > 0 {
 		ev["listed"] = listed
-		names := []string{}
+		var hit []string
 		for _, l := range listed {
-			names = appendUnique(names, l["domain"])
+			hit = appendUnique(hit, l["domain"])
 		}
 		r.add(verdict.Check{
 			ID: "content.blocklists", Category: verdict.Content, Status: verdict.Fail,
-			Title:    "Links to a blocklisted domain: " + strings.Join(names, ", "),
+			Title:    "Links to a blocklisted domain (" + strings.Join(hit, ", ") + ")",
 			Detail:   "Filters reject or junk mail that links to domains on these lists, whatever else the message gets right.",
 			Evidence: ev,
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Remove links to the listed domains, or ask the list to delist a domain you own."},
@@ -310,19 +380,101 @@ func (r *run) checkBlocklists() {
 		})
 		return
 	}
-	if answered == 0 {
-		reason := "The blocklists did not answer."
-		if len(refused) > 0 {
-			reason = "The blocklists refused the query, which they do for large public DNS resolvers. Use a resolver of your own to run this check."
+	if len(problems) > 0 || len(unchecked) > 0 {
+		reason := strings.Join(problems, "; ")
+		if len(unchecked) > 0 {
+			if reason != "" {
+				reason += "; "
+			}
+			reason += fmt.Sprintf("%d more domains were not looked up (the limit is %d)", len(unchecked), maxBlocklistDomains)
 		}
-		r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up", reason))
+		c := skipped("content.blocklists", verdict.Content, "Not every link domain could be looked up", strings.ToUpper(reason[:1])+reason[1:]+".")
+		c.Evidence = ev
+		r.add(c)
 		return
 	}
 	r.add(verdict.Check{
 		ID: "content.blocklists", Category: verdict.Content, Status: verdict.Pass,
-		Title:    fmt.Sprintf("No link domain is on Spamhaus DBL or SURBL (%d checked)", len(domains)),
+		Title:    fmt.Sprintf("No link domain is on %s (%s checked)", joinList(names, "or"), plural(len(domains), "domain")),
 		Evidence: ev,
 	})
+}
+
+type blState int
+
+const (
+	blClear blState = iota
+	blListed
+	blRefused
+	blFailed
+)
+
+type blResult struct {
+	state   blState
+	answer  string
+	detail  string
+	offline bool
+}
+
+func (b blResult) describe() string {
+	switch b.state {
+	case blClear:
+		return "not listed"
+	case blListed:
+		return "listed"
+	case blRefused:
+		return "refused, " + b.detail
+	}
+	return b.detail
+}
+
+func (r *run) queryBlocklist(ctx context.Context, bl Blocklist, domain string) blResult {
+	ctx, cancel := context.WithTimeout(ctx, blocklistLookupTimeout)
+	defer cancel()
+	ips, err := r.lookupA(ctx, domain+"."+bl.Zone)
+	if err != nil {
+		if errors.Is(err, ErrOffline) {
+			return blResult{offline: true}
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return blResult{state: blClear}
+		}
+		if ctx.Err() != nil {
+			return blResult{state: blFailed, detail: "timed out"}
+		}
+		return blResult{state: blFailed, detail: "lookup failed"}
+	}
+	for _, ip := range ips {
+		if reason := bl.refusal(ip); reason != "" {
+			return blResult{state: blRefused, answer: ip.String(), detail: reason}
+		}
+		if bl.listed(ip) {
+			return blResult{state: blListed, answer: ip.String()}
+		}
+	}
+	return blResult{state: blFailed, answer: fmt.Sprint(ips), detail: "unexpected answer"}
+}
+
+// lookupA asks for IPv4 addresses only, which is all a blocklist answers
+// with, when the resolver supports it.
+func (r *run) lookupA(ctx context.Context, host string) ([]net.IP, error) {
+	if ip4, ok := r.res.(interface {
+		LookupIP(context.Context, string, string) ([]net.IP, error)
+	}); ok {
+		return ip4.LookupIP(ctx, "ip4", host)
+	}
+	addrs, err := r.res.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var out []net.IP
+	for _, a := range addrs {
+		if v4 := a.IP.To4(); v4 != nil {
+			out = append(out, v4)
+		}
+	}
+	return out, nil
 }
 
 func linkHost(u string) string {
@@ -333,25 +485,40 @@ func linkHost(u string) string {
 	return strings.ToLower(p.Hostname())
 }
 
+// File extensions and names that look like domains in link text. Some
+// (.zip, .mov, .md) are real top-level domains, but in a newsletter they are
+// far more often a file or a technology name.
+var notDomains = map[string]bool{
+	"js": true, "ts": true, "py": true, "rb": true, "go": true, "rs": true, "sh": true,
+	"md": true, "txt": true, "pdf": true, "doc": true, "docx": true, "xls": true,
+	"xlsx": true, "csv": true, "zip": true, "mov": true, "mp4": true, "mp3": true,
+	"jpg": true, "jpeg": true, "png": true, "gif": true, "svg": true, "webp": true,
+	"html": true, "json": true,
+}
+
 // looksLikeDomain returns the host named by link text such as
-// "example.com/path" or "https://example.com", or "" for ordinary words.
+// "example.com/path", "www.example.com", or "https://example.com", or ""
+// for words, file names, and technology names like "Node.js".
 func looksLikeDomain(text string) string {
 	t := strings.ToLower(strings.TrimSpace(text))
 	if t == "" || strings.ContainsAny(t, " \t") {
 		return ""
 	}
+	explicit := strings.Contains(t, "://") || strings.HasPrefix(t, "www.")
 	if !strings.Contains(t, "://") {
 		t = "https://" + t
 	}
-	h := linkHost(t)
-	dot := strings.LastIndex(h, ".")
-	if dot <= 0 || dot == len(h)-1 {
+	u, err := url.Parse(t)
+	if err != nil || u.Hostname() == "" || net.ParseIP(u.Hostname()) != nil {
 		return ""
 	}
-	for _, c := range h[dot+1:] {
-		if !unicode.IsLetter(c) {
-			return ""
-		}
+	h := strings.ToLower(u.Hostname())
+	suffix, icann := publicsuffix.PublicSuffix(h)
+	if !icann || suffix == h {
+		return ""
+	}
+	if !explicit && notDomains[suffix] && strings.Trim(u.Path, "/") == "" {
+		return ""
 	}
 	return h
 }

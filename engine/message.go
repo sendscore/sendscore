@@ -227,11 +227,13 @@ func tagList(s string) map[string]string {
 	return out
 }
 
+// truncate shortens s to n characters, never splitting one.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "..."
 }
 
 // addrDomain returns the lowercased domain of an address such as

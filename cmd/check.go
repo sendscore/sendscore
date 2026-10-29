@@ -27,6 +27,10 @@ type checkFlags struct {
 	helo     string
 	tls      string
 	previous string
+
+	spamhausKey      string
+	surblZone        string
+	publicBlocklists bool
 }
 
 func newCheck() *cobra.Command {
@@ -39,6 +43,10 @@ func newCheck() *cobra.Command {
 A saved file does not record which server delivered it, so SPF, reverse DNS,
 and TLS are skipped unless you pass --ip (and ideally --mail-from). Messages
 sent to a SendScore address have all of it.
+
+Link domains are only looked up on blocklists when you ask: --spamhaus-key
+(Spamhaus DQS, allowed for commercial use), --surbl-zone, or
+--public-blocklists (the free zones, for non-commercial use only).
 
 Exit codes: 0 every check passed, 1 warnings only, 2 a check failed,
 64 usage error.`,
@@ -56,6 +64,9 @@ Exit codes: 0 every check passed, 1 warnings only, 2 a check failed,
 	fl.StringVar(&f.helo, "helo", "", "HELO name the delivering server gave")
 	fl.StringVar(&f.tls, "tls", "", `whether delivery used TLS: "yes" or "no"`)
 	fl.StringVar(&f.previous, "previous", "", "the publication's previous issue (.eml), to list what changed")
+	fl.StringVar(&f.spamhausKey, "spamhaus-key", os.Getenv("SENDSCORE_SPAMHAUS_DQS_KEY"), "Spamhaus DQS key, to look link domains up on Spamhaus DBL (or SENDSCORE_SPAMHAUS_DQS_KEY)")
+	fl.StringVar(&f.surblZone, "surbl-zone", os.Getenv("SENDSCORE_SURBL_ZONE"), "SURBL data feed zone, for subscribers (or SENDSCORE_SURBL_ZONE)")
+	fl.BoolVar(&f.publicBlocklists, "public-blocklists", false, "look link domains up on the free public Spamhaus DBL and SURBL zones (non-commercial use only)")
 	return c
 }
 
@@ -87,6 +98,7 @@ func (f *checkFlags) options() (engine.Options, error) {
 		o.Resolver = engine.OfflineResolver{}
 	}
 	o.CheckLinks = f.links
+	o.Blocklists = blocklists(f.spamhausKey, f.surblZone, f.publicBlocklists)
 	if f.ip != "" {
 		ip := net.ParseIP(f.ip)
 		if ip == nil {
@@ -168,4 +180,23 @@ func exitFor(v *verdict.Verdict) error {
 		return &ExitError{Code: ExitWarn}
 	}
 	return nil
+}
+
+// blocklists builds the lists content.blocklists uses. A key or zone wins
+// over the free public zone for the same list.
+func blocklists(spamhausKey, surblZone string, public bool) []engine.Blocklist {
+	var out []engine.Blocklist
+	switch {
+	case spamhausKey != "":
+		out = append(out, engine.SpamhausDQS(spamhausKey))
+	case public:
+		out = append(out, engine.SpamhausPublic())
+	}
+	switch {
+	case surblZone != "":
+		out = append(out, engine.SURBLZone(surblZone))
+	case public:
+		out = append(out, engine.SURBLPublic())
+	}
+	return out
 }

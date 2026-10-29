@@ -68,7 +68,13 @@ Statuses are `pass`, `warn`, `fail`, `info`, and `skipped` (with a reason). The 
 
 There is no list of "spam words". Mailbox providers filter on reputation, authentication, and engagement, so a word list would flag ordinary copy while claiming to know a filter's decision. The content checks look for things with a factual basis instead, such as links to domains on Spamhaus DBL or SURBL, URL shorteners, link text that names a different domain from the link, image-only issues, missing preview text, and scripts, forms, or attachments.
 
-Spamhaus refuses queries that come through large public DNS resolvers. When it does, `content.blocklists` is skipped with that reason rather than passed.
+`content.blocklists` only runs when you ask for it, because the free Spamhaus and SURBL zones are for non-commercial use:
+
+- `--spamhaus-key KEY` (or `SENDSCORE_SPAMHAUS_DQS_KEY`) uses Spamhaus DBL through Data Query Service, which allows commercial use.
+- `--surbl-zone ZONE` (or `SENDSCORE_SURBL_ZONE`) uses a SURBL data feed zone.
+- `--public-blocklists` uses the free public zones, for non-commercial use only. Spamhaus refuses these through large public DNS resolvers.
+
+Each list's test domain is looked up first to prove the list is answering. The check only passes when every list answered for every domain. A refusal, a timeout, or more than 100 domains makes it `skipped` with the reason, never a pass.
 
 ## Use it from Go
 

@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -69,9 +70,16 @@ func goodDNS() *fakeDNS {
 			"bounce.example.com":        {"v=spf1 ip4:203.0.113.0/24 -all"},
 		},
 		ptr: map[string][]string{sendIP: {"mail.example.net."}},
-		ip:  map[string][]net.IPAddr{"mail.example.net": {{IP: net.ParseIP(sendIP)}}},
+		ip: map[string][]net.IPAddr{
+			"mail.example.net": {{IP: net.ParseIP(sendIP)}},
+			// Each list's test domain is always listed.
+			"dbltest.com.dbl.spamhaus.org":   {{IP: net.ParseIP("127.0.1.2")}},
+			"test.surbl.org.multi.surbl.org": {{IP: net.ParseIP("127.0.0.126")}},
+		},
 	}
 }
+
+var publicLists = []Blocklist{SpamhausPublic(), SURBLPublic()}
 
 const goodHTML = `<html><head><style>p{color:#333}</style></head><body>
 <p>Hello. Today: shooting into the sun.</p>
@@ -180,7 +188,7 @@ func wantStatus(t *testing.T, v *verdict.Verdict, id string, want verdict.Status
 }
 
 func TestEverythingRight(t *testing.T) {
-	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Envelope: envelope()})
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Envelope: envelope(), Blocklists: publicLists})
 	for _, id := range []string{
 		"auth.dkim", "auth.dkim_key", "auth.spf", "auth.spf_lookups", "auth.dmarc_record",
 		"auth.dmarc", "auth.alignment", "auth.ptr", "auth.tls",
@@ -469,7 +477,7 @@ func TestBlocklists(t *testing.T) {
 	dns := goodDNS()
 	dns.ip["badlinks.test.dbl.spamhaus.org"] = []net.IPAddr{{IP: net.ParseIP("127.0.1.2")}}
 	html := strings.Replace(goodHTML, "https://example.com/posts/sun", "https://www.badlinks.test/offer", 1)
-	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{Resolver: dns})
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{Resolver: dns, Blocklists: publicLists})
 	c := find(t, v, "content.blocklists")
 	if c.Status != verdict.Fail || !strings.Contains(c.Title, "badlinks.test") {
 		t.Errorf("blocklists = %s %s", c.Status, c.Title)
@@ -493,7 +501,7 @@ func (r refusingDNS) LookupIPAddr(ctx context.Context, host string) ([]net.IPAdd
 }
 
 func TestBlocklistRefusalIsSkipped(t *testing.T) {
-	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: refusingDNS{goodDNS()}})
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: refusingDNS{goodDNS()}, Blocklists: publicLists})
 	c := find(t, v, "content.blocklists")
 	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "refused") {
 		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
@@ -507,5 +515,155 @@ func TestAttachmentsAreRecorded(t *testing.T) {
 	c := find(t, v, "content.active")
 	if c.Status != verdict.Warn || !strings.Contains(c.Title, "issue.pdf") {
 		t.Errorf("active = %s %s", c.Status, c.Title)
+	}
+}
+
+func TestBlocklistsOffByDefault(t *testing.T) {
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "off") {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+func TestBlocklistIPLinksAreNotLookedUp(t *testing.T) {
+	dns := goodDNS()
+	// What DBL really answers for an IP address: an error code in its range.
+	dns.ip["203.0.113.5.dbl.spamhaus.org"] = []net.IPAddr{{IP: net.ParseIP("127.0.1.255")}}
+	html := strings.Replace(goodHTML, "https://example.com/posts/sun", "https://203.0.113.5/x", 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{Resolver: dns, Blocklists: publicLists})
+	wantStatus(t, v, "content.blocklists", verdict.Pass)
+}
+
+// partialDNS refuses Spamhaus while SURBL answers normally.
+type partialDNS struct{ *fakeDNS }
+
+func (p partialDNS) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if strings.HasSuffix(host, ".dbl.spamhaus.org") {
+		return []net.IPAddr{{IP: net.ParseIP("127.255.255.254")}}, nil
+	}
+	return p.fakeDNS.LookupIPAddr(ctx, host)
+}
+
+func TestBlocklistPartialRefusalIsNotAPass(t *testing.T) {
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: partialDNS{goodDNS()}, Blocklists: publicLists})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "Spamhaus") {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+func TestBlocklistSilentResolverIsNotAPass(t *testing.T) {
+	// A resolver that answers "no such name" for everything, including the
+	// lists' test domains, has not checked anything.
+	dns := goodDNS()
+	delete(dns.ip, "dbltest.com.dbl.spamhaus.org")
+	delete(dns.ip, "test.surbl.org.multi.surbl.org")
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: dns, Blocklists: publicLists})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "test lookup") {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+// failingDNS fails lookups for one domain, as a timeout would.
+type failingDNS struct{ *fakeDNS }
+
+func (f failingDNS) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if strings.HasPrefix(host, "example.com.") {
+		return nil, &net.DNSError{Err: "i/o timeout", Name: host, IsTimeout: true}
+	}
+	return f.fakeDNS.LookupIPAddr(ctx, host)
+}
+
+func TestBlocklistFailedLookupIsNotAPass(t *testing.T) {
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: failingDNS{goodDNS()}, Blocklists: publicLists})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "example.com") {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+func TestBlocklistTooManyDomainsIsNotAPass(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < maxBlocklistDomains+5; i++ {
+		fmt.Fprintf(&b, `<p><a href="https://site%03d.test/">Read more</a></p>`, i)
+	}
+	html := strings.Replace(goodHTML, "</body>", b.String()+"</body>", 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{Blocklists: publicLists})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || c.Evidence["not_checked"] == nil {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+func TestLinkTextSingleMismatchIsFlagged(t *testing.T) {
+	html := `<html><body><p>Your account needs attention before Friday, so please sign in and check it.</p>
+<p><a href="https://evil.test/login">paypal.com</a></p></body></html>`
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.link_text", verdict.Warn)
+}
+
+func TestLinkTextIgnoresFileAndTechNames(t *testing.T) {
+	html := strings.Replace(goodHTML, "</body>", `<p><a href="https://nodejs.org/">Node.js</a> and <a href="https://example.com/r">report.pdf</a> and <a href="https://example.com/x"><img src="https://cdn.example.com/h.jpg" alt="header.jpg"></a> and <a href="https://github.com/a/b">README.md</a></p></body>`, 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.link_text", verdict.Pass)
+}
+
+func TestLinkTextIsDeterministic(t *testing.T) {
+	// Two domains with two links each: no tracking domain, so the result
+	// must be the same every run.
+	html := `<html><body><p>A short issue with four links to two places, for this test.</p>
+<p><a href="https://brand-a.com/1">brand-b.com</a> <a href="https://brand-a.com/2">two</a> <a href="https://brand-b.com/1">three</a> <a href="https://brand-b.com/2">four</a></p></body></html>`
+	raw := buildMessage(t, msgOpts{sign: true, html: html})
+	first := find(t, analyze(t, raw, Options{}), "content.link_text").Status
+	for i := 0; i < 50; i++ {
+		if got := find(t, analyze(t, raw, Options{}), "content.link_text").Status; got != first {
+			t.Fatalf("run %d = %s, first run = %s", i, got, first)
+		}
+	}
+	if first != verdict.Warn {
+		t.Errorf("link_text = %s, want warn", first)
+	}
+}
+
+func TestLinkTextKnownTrackerIsAllowed(t *testing.T) {
+	html := strings.Replace(goodHTML, "</body>", `<p><a href="https://click.convertkit-mail.com/abc">example.com/posts/sun</a></p></body>`, 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.link_text", verdict.Pass)
+}
+
+func TestPreheaderIgnoresTheTitle(t *testing.T) {
+	html := `<html><head><title>Weekly Digest</title></head><body><p><a href="https://example.com/web">View this email in your browser</a></p><p>Hello there.</p></body></html>`
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.preheader", verdict.Warn)
+}
+
+func TestJSONLDIsNotActiveContent(t *testing.T) {
+	html := strings.Replace(goodHTML, "</body>", `<script type="application/ld+json">{"@context":"http://schema.org"}</script></body>`, 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.active", verdict.Pass)
+}
+
+func TestOnePhotoWithAParagraphIsNotImageOnly(t *testing.T) {
+	html := `<html><body><img src="https://cdn.example.com/sun.jpg" alt="Sunset"><p>Shoot into the sun with the sun just outside the frame.</p><p><a href="https://example.com/unsubscribe?u=1">Unsubscribe</a></p></body></html>`
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.text_ratio", verdict.Pass)
+}
+
+func TestSubjectTitleReadsAsASentence(t *testing.T) {
+	subj := "HUGE SALE ON EVERY LENS AND EVERY CAMERA BODY IN THE STORE THIS WEEKEND ONLY!!"
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, subject: subj}), Options{})
+	c := find(t, v, "content.subject")
+	want := "The subject line runs 78 characters, past the 70 a phone shows, is written in capitals, and has 2 exclamation marks"
+	if c.Title != want {
+		t.Errorf("title = %q\nwant    %q", c.Title, want)
+	}
+}
+
+func TestTruncateKeepsWholeCharacters(t *testing.T) {
+	got := truncate(strings.Repeat("é", 50), 40)
+	if strings.ContainsRune(got, '\uFFFD') || len([]rune(got)) != 43 {
+		t.Errorf("truncate = %q", got)
 	}
 }

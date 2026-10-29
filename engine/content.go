@@ -13,7 +13,10 @@ import (
 
 type link struct {
 	Href string
+	// Text is what a reader sees, including the alt text of a linked image.
 	Text string
+	// Words is the link's own text, without alt text.
+	Words string
 }
 
 type image struct {
@@ -35,7 +38,7 @@ func parseHTML(s string) *parsedHTML {
 	p := &parsedHTML{}
 	z := html.NewTokenizer(strings.NewReader(s))
 	var open *link
-	var text strings.Builder
+	var text, words strings.Builder
 	for {
 		tt := z.Next()
 		switch tt {
@@ -48,8 +51,13 @@ func parseHTML(s string) *parsedHTML {
 				if href := attr(t, "href"); href != nil {
 					open = &link{Href: strings.TrimSpace(*href)}
 					text.Reset()
+					words.Reset()
 				}
-			case "script", "form", "iframe", "object", "embed":
+			case "script":
+				if typ := attr(t, "type"); typ == nil || !strings.EqualFold(strings.TrimSpace(*typ), "application/ld+json") {
+					p.Active = appendUnique(p.Active, t.Data)
+				}
+			case "form", "iframe", "object", "embed":
 				p.Active = appendUnique(p.Active, t.Data)
 			case "img":
 				src := attr(t, "src")
@@ -69,12 +77,15 @@ func parseHTML(s string) *parsedHTML {
 			}
 		case html.TextToken:
 			if open != nil {
-				text.Write(z.Text())
+				t := z.Text()
+				text.Write(t)
+				words.Write(t)
 			}
 		case html.EndTagToken:
 			if open != nil {
 				if name, _ := z.TagName(); string(name) == "a" {
 					open.Text = strings.Join(strings.Fields(text.String()), " ")
+					open.Words = strings.Join(strings.Fields(words.String()), " ")
 					p.Links = append(p.Links, *open)
 					open = nil
 				}
@@ -175,16 +186,23 @@ func visibleText(s string) string {
 	var b strings.Builder
 	z := html.NewTokenizer(strings.NewReader(s))
 	skip := 0
+	hidden := func(n []byte) bool {
+		switch string(n) {
+		case "head", "title", "style", "script":
+			return true
+		}
+		return false
+	}
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
 			return b.String()
 		case html.StartTagToken:
-			if n, _ := z.TagName(); string(n) == "style" || string(n) == "script" {
+			if n, _ := z.TagName(); hidden(n) {
 				skip++
 			}
 		case html.EndTagToken:
-			if n, _ := z.TagName(); (string(n) == "style" || string(n) == "script") && skip > 0 {
+			if n, _ := z.TagName(); hidden(n) && skip > 0 {
 				skip--
 			}
 		case html.TextToken:
