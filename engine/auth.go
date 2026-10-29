@@ -319,11 +319,15 @@ func (r *run) checkSPFLookups() {
 		return
 	}
 	n, err := r.countSPF(r.spfDom, 0, map[string]bool{})
-	if reason := lookupFailed(err); reason != "" {
+	if err != nil && !errors.Is(err, errNoSPF) {
+		reason := lookupFailed(err)
+		if reason == "" {
+			reason = err.Error()
+		}
 		r.add(skipped("auth.spf_lookups", verdict.Auth, "SPF record not inspected", reason))
 		return
 	}
-	if errors.Is(err, errNoSPF) || err != nil {
+	if errors.Is(err, errNoSPF) {
 		r.add(verdict.Check{
 			ID: "auth.spf_lookups", Category: verdict.Auth, Status: verdict.Fail,
 			Title:    "No SPF record for " + r.spfDom,

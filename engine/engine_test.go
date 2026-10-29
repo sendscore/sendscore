@@ -401,3 +401,10 @@ func TestSafeClientRefusesPrivateAddresses(t *testing.T) {
 		t.Error("a public address was refused")
 	}
 }
+
+func TestNoSPFRecordFails(t *testing.T) {
+	dns := goodDNS()
+	delete(dns.txt, "bounce.example.com")
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: dns})
+	wantStatus(t, v, "auth.spf_lookups", verdict.Fail)
+}
