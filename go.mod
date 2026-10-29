@@ -2,6 +2,8 @@ module github.com/sendscore/sendscore
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	blitiri.com.ar/go/spf v1.6.0
 	github.com/emersion/go-msgauth v0.7.0

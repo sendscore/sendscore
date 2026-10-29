@@ -26,13 +26,31 @@ var freeMailboxDomains = map[string]bool{
 func (r *run) structure() {
 	m := r.msg
 
-	if m.MIMEErr != nil {
+	var mimeEv map[string]any
+	if len(m.MIMENotes) > 0 {
+		notes := m.MIMENotes
+		mimeEv = map[string]any{"notes": notes}
+		if len(notes) > 20 {
+			mimeEv["notes"] = notes[:20]
+			mimeEv["notes_total"] = len(notes)
+		}
+	}
+	switch {
+	case m.MIMEErr != nil:
 		r.add(verdict.Check{
 			ID: "struct.mime", Category: verdict.Structure, Status: verdict.Fail,
-			Title: "The MIME structure is malformed", Detail: m.MIMEErr.Error(),
+			Title: "The MIME structure is malformed", Detail: m.MIMEErr.Error(), Evidence: mimeEv,
 			Fix: &verdict.Fix{Who: verdict.FixedByProvider, Text: "Mail clients may show this message wrongly or not at all. Send the raw message to your email platform's support."},
 		})
-	} else {
+	case len(m.MIMENotes) > 0:
+		r.add(verdict.Check{
+			ID: "struct.mime", Category: verdict.Structure, Status: verdict.Warn,
+			Title:    "The MIME structure has problems that were worked around",
+			Detail:   "SendScore could still read the message, but some mail clients may not.",
+			Evidence: mimeEv,
+			Fix:      &verdict.Fix{Who: verdict.FixedByProvider, Text: "Send the raw message to your email platform's support, so they can fix how it is built."},
+		})
+	default:
 		r.add(verdict.Check{ID: "struct.mime", Category: verdict.Structure, Status: verdict.Pass, Title: "The MIME structure parses cleanly"})
 	}
 
@@ -92,11 +110,13 @@ func (r *run) structure() {
 		r.add(verdict.Check{
 			ID: "struct.from_domain", Category: verdict.Structure, Status: verdict.Fail,
 			Title:    "Sent from a free mailbox address (" + r.fromDom + ")",
-			Detail:   r.fromDom + " publishes a strict DMARC policy, so newsletters sent through a platform as this address fail it.",
+			Detail:   r.fromDom + " belongs to a mailbox provider, not to you, so mail your platform sends as this address cannot align with its DMARC record. Gmail and Yahoo require bulk mail to align, and several of these providers publish a quarantine or reject policy.",
 			Evidence: map[string]any{"from_domain": r.fromDom},
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Send from an address on a domain you own."},
 		})
 	} else if r.fromDom != "" {
 		r.add(verdict.Check{ID: "struct.from_domain", Category: verdict.Structure, Status: verdict.Pass, Title: "Sent from your own domain (" + r.fromDom + ")"})
+	} else {
+		r.add(skipped("struct.from_domain", verdict.Structure, "From domain not checked", "The From header has no address with a domain to check."))
 	}
 }

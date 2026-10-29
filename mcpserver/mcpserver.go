@@ -65,7 +65,9 @@ func New(b Backend, version string) *mcp.Server {
 		Name:        "get_test_address",
 		Title:       "Get a test address",
 		Description: "Create a one-time email address. Send a preview of the newsletter issue to it from the email platform, then call wait_for_message with the token. The address accepts mail for 24 hours. To check a fixed version, send it to the same address and pass the earlier report_id to wait_for_message as after_report_id.",
-		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptr(false)},
+		// Creating an address changes state but destroys nothing, and each
+		// call makes a new one.
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: ptr(false), IdempotentHint: false, OpenWorldHint: ptr(false)},
 	}, t.getTestAddress)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -82,14 +84,14 @@ func New(b Backend, version string) *mcp.Server {
 		Name:        "get_report",
 		Title:       "Get a full report",
 		Description: "Return the full verdict for a report: every check with its status, evidence, and fix, plus the fingerprint used for comparisons.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(false)},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 	}, t.getReport)
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "compare_to_previous",
 		Title:       "Compare with the previous issue",
 		Description: "List what changed between two reports, for example two previews of the same issue, or the last issue and today's preview while both reports are kept (7 days): signing domains, Return-Path, unsubscribe headers, link hosts, size, and authentication results. Changes that made a check worse are marked worsened.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(false)},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)},
 	}, t.compareToPrevious)
 	return s
 }
@@ -127,7 +129,9 @@ func (t *tools) waitForMessage(ctx context.Context, _ *mcp.CallToolRequest, in w
 	}
 	timeout := defaultWait
 	if in.TimeoutSeconds > 0 {
-		timeout = min(time.Duration(in.TimeoutSeconds)*time.Second, maxWait)
+		// Clamp before converting, so a huge value cannot overflow into a
+		// negative duration.
+		timeout = time.Duration(min(in.TimeoutSeconds, int(maxWait/time.Second))) * time.Second
 	}
 	v, err := t.b.Wait(ctx, in.Token, in.AfterReportID, timeout)
 	if errors.Is(err, ErrNotReceived) {

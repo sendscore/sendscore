@@ -327,7 +327,7 @@ func (r *run) checkActiveContent() {
 	})
 }
 
-// checkBlocklists looks the domains of every link and image up on the
+// checkBlocklists looks the hosts and domains of every link and image up on the
 // configured domain blocklists. It only passes when every list answered for
 // every domain, and it proves each list answers by looking up the list's
 // own test domain first. Nothing is looked up unless lists are configured:
@@ -342,7 +342,10 @@ func (r *run) checkBlocklists() {
 	// Hosts are looked up as ASCII DNS names. One that cannot be written as
 	// one (a bad IDN, or a label over 63 bytes) is reported as not checked:
 	// a resolver refuses such a name locally, which would read as not listed.
+	// Each host is looked up both as itself and as its registrable domain:
+	// Spamhaus DBL also lists single abused hosts on a shared domain.
 	var all, invalid set
+	hostOnly := map[string]bool{}
 	addHost := func(u string) {
 		h := linkHost(u)
 		if h == "" || net.ParseIP(h) != nil {
@@ -353,7 +356,15 @@ func (r *run) checkBlocklists() {
 			invalid.add(h)
 			return
 		}
-		all.add(orgDomain(ascii))
+		org := orgDomain(ascii)
+		all.add(org)
+		hostOnly[org] = false
+		if ascii != org {
+			all.add(ascii)
+			if _, isOrg := hostOnly[ascii]; !isOrg {
+				hostOnly[ascii] = true
+			}
+		}
 	}
 	for _, l := range r.parsed.Links {
 		addHost(l.Href)
@@ -398,6 +409,10 @@ func (r *run) checkBlocklists() {
 	for _, bl := range lists {
 		jobs = append(jobs, job{list: bl, domain: bl.TestDomain, test: true})
 		for _, d := range domains {
+			// SURBL lists registrable domains only.
+			if bl.kind == "surbl" && hostOnly[d] {
+				continue
+			}
 			jobs = append(jobs, job{list: bl, domain: d})
 		}
 	}
@@ -461,7 +476,7 @@ func (r *run) checkBlocklists() {
 		}
 		r.add(verdict.Check{
 			ID: "content.blocklists", Category: verdict.Content, Status: verdict.Fail,
-			Title:    "Links to a blocklisted domain (" + strings.Join(shown, ", ") + ")",
+			Title:    "Links to a blocklisted host or domain (" + strings.Join(shown, ", ") + ")",
 			Detail:   "Filters reject or junk mail that links to domains on these lists, whatever else the message gets right.",
 			Evidence: ev,
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Remove links to the listed domains, or ask the list to delist a domain you own."},
@@ -477,7 +492,7 @@ func (r *run) checkBlocklists() {
 			reasons = append(reasons, strings.Join(problems.items, "; "))
 		}
 		if len(unchecked) > 0 {
-			reasons = append(reasons, fmt.Sprintf("%d more domains were not looked up (the limit is %d)", len(unchecked), maxBlocklistDomains))
+			reasons = append(reasons, fmt.Sprintf("%d more host and domain names were not looked up (the limit is %d)", len(unchecked), maxBlocklistDomains))
 		}
 		if len(invalid.items) > 0 {
 			reasons = append(reasons, fmt.Sprintf("%s could not be looked up because %s not valid DNS names",
@@ -491,7 +506,7 @@ func (r *run) checkBlocklists() {
 	}
 	r.add(r.partial(verdict.Check{
 		ID: "content.blocklists", Category: verdict.Content, Status: verdict.Pass,
-		Title:    fmt.Sprintf("No link domain is on %s (%s checked)", joinList(names, "or"), plural(len(domains), "domain")),
+		Title:    fmt.Sprintf("No link host or domain is on %s (%s checked)", joinList(names, "or"), plural(len(domains), "name")),
 		Evidence: ev,
 	}))
 }

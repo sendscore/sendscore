@@ -85,7 +85,9 @@ type run struct {
 	spfDom  string
 	spfRes  verdict.Status
 	// spfTemp is set when SPF was skipped because DNS failed.
-	spfTemp  bool
+	spfTemp bool
+	// authDNS is set when a DNS failure hid an authentication result.
+	authDNS  bool
 	parsed   *parsedHTML
 	dmarcRec *dmarcRecord
 	dmarcErr error
@@ -132,7 +134,7 @@ func Analyze(ctx context.Context, raw []byte, opts Options) (*verdict.Verdict, e
 			v.Checks = append(v.Checks, c)
 		}
 	}
-	rollUp(v, opts.Blocking)
+	rollUp(v, opts.Blocking, r.authDNS)
 	return v, nil
 }
 

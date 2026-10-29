@@ -25,6 +25,8 @@ sendscore check --previous last.eml issue.eml
 sendscore diff before.eml after.eml    # what changed between two issues
 ```
 
+`diff` and `--previous` compare only what the messages themselves carry: signing domains and selectors, the Return-Path, unsubscribe headers, link hosts, the number of links and images, and size. They make no DNS lookups for the older message and do not compare authentication results, because re-checking last week's message against today's DNS would show today's answer, not the one it got when it was sent. To see whether a DNS change broke authentication, check a new message.
+
 Save a message as `.eml` from your mail client ("Show original" and "Download" in Gmail, "Save As" in Apple Mail), or pipe one in with `sendscore check -`.
 
 A saved file does not record which server delivered it, so SPF, reverse DNS, and TLS are skipped unless you pass the envelope:
@@ -40,17 +42,28 @@ Other flags:
 - `--links` fetches every link and image. Off by default: it is slow, and it touches your tracking links. Unsubscribe, confirm, and preference links are never fetched, and private and loopback addresses are refused.
 - `--offline` makes no DNS lookups. Checks that need DNS are skipped, not failed.
 
-Exit codes: `0` every check passed, `1` warnings only, `2` a check failed, `64` usage error. `diff` exits `1` when a change made a check worse.
+Exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Every check passed. |
+| `1` | Warnings only. `diff` exits `1` when a change made a check worse. |
+| `2` | A check failed. |
+| `64` | Usage error, such as an unknown flag or a bad `--ip`. |
+| `65` | The input is not an email message, or is larger than 25 MB. |
+| `66` | The input file cannot be read. |
+| `70` | Internal error. |
+| `74` | The report cannot be written. |
 
 ## MCP
 
 `sendscore mcp` runs SendScore's MCP tools over stdio for Claude Code, Claude Desktop, or any MCP client:
 
 ```sh
-claude mcp add sendscore -- sendscore mcp
+claude mcp add sendscore --env SENDSCORE_TOKEN=ss_live_... -- sendscore mcp
 ```
 
-The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare_to_previous`. They call a SendScore app's API: `SENDSCORE_URL` (default `https://app.sendscore.ai`, or your own instance) and `SENDSCORE_TOKEN` when the app requires one. The hosted app also serves the same tools as a remote connector at `https://app.sendscore.ai/api/mcp`.
+The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare_to_previous`. They call a SendScore app's API, which needs an API token on every request. Create one on the Account page of the app and set it as `SENDSCORE_TOKEN`. `SENDSCORE_URL` points at the app, and defaults to `https://app.sendscore.ai` (set it for your own instance). The hosted app also serves the same tools as a remote connector at `https://app.sendscore.ai/api/mcp`.
 
 An agent's loop: get a test address, send the issue's preview to it from the email platform, wait for the verdict, and fix what `top_fixes` lists before scheduling.
 
@@ -91,8 +104,10 @@ v, err := engine.Analyze(ctx, raw, engine.Options{
 ## Develop
 
 ```sh
-make check    # gofmt, go vet, go test
+make check    # gofmt, go vet, go test -race, and govulncheck
 ```
+
+`go.mod` pins the Go toolchain, so builds use a release with the current security fixes even when an older Go is installed.
 
 No em or en dashes anywhere in the repository; a test enforces it.
 

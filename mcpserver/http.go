@@ -74,10 +74,20 @@ func (h *HTTPBackend) CreateTestAddress(ctx context.Context) (TestAddress, error
 	return a, err
 }
 
+// waitBackoff is the shortest pause between wait requests, and
+// maxWaitBackoff the longest. A server that answers at once (one shutting
+// down, or a proxy) is asked again after a pause that doubles each time,
+// never in a tight loop.
+const (
+	waitBackoff    = time.Second
+	maxWaitBackoff = 8 * time.Second
+)
+
 // Wait implements Backend, splitting long waits into requests the server
 // accepts.
 func (h *HTTPBackend) Wait(ctx context.Context, token, after string, timeout time.Duration) (*verdict.Verdict, error) {
 	deadline := time.Now().Add(timeout)
+	pause := waitBackoff
 	for {
 		left := time.Until(deadline)
 		if left <= 0 {
@@ -95,12 +105,46 @@ func (h *HTTPBackend) Wait(ctx context.Context, token, after string, timeout tim
 		if after != "" {
 			path += "&after=" + url.QueryEscape(after)
 		}
+		started := time.Now()
 		if err := h.do(ctx, http.MethodGet, path, &out); err != nil {
 			return nil, err
 		}
-		if out.Status == "received" && out.Verdict != nil {
+		switch {
+		case out.Status == "received" && out.Verdict != nil:
 			return out.Verdict, nil
+		case out.Status == "received":
+			return nil, fmt.Errorf("sendscore: the wait answer said received but had no verdict")
+		case out.Status != "not_received":
+			return nil, fmt.Errorf("sendscore: the wait answer had an unknown status %q", out.Status)
 		}
+		// A server that held the request for most of its timeout is
+		// working, so ask again soon. One that answered early gets a
+		// longer pause each time.
+		held := time.Since(started) >= time.Duration(secs)*time.Second/2
+		if held {
+			pause = waitBackoff
+		}
+		if err := sleep(ctx, min(pause, time.Until(deadline))); err != nil {
+			return nil, err
+		}
+		if !held {
+			pause = min(pause*2, maxWaitBackoff)
+		}
+	}
+}
+
+// sleep waits for d or until ctx is done.
+func sleep(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }
 

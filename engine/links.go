@@ -22,6 +22,9 @@ const (
 	linkConcurrency = 8
 	linkTimeout     = 10 * time.Second
 	maxRedirects    = 5
+	// linkCheckDeadline bounds all the link and image fetches of one
+	// analysis together.
+	linkCheckDeadline = 30 * time.Second
 )
 
 // Words in a URL that mean following it does something to a subscription.
@@ -29,12 +32,24 @@ const (
 var actionWords = []string{
 	"unsubscribe", "unsub", "optout", "opt-out", "opt_out", "remove",
 	"confirm", "preferences", "manage", "subscription", "list-manage.com/profile",
+	"disable_email",
+}
+
+// Unsubscribe words in other languages. They are matched in a URL's path
+// and query only, so a host name that happens to contain one is not
+// affected. Some are stems, such as "sabonn" for "desabonner" and
+// "désabonner", or "sinscri" for "desinscribirse" and "désinscrire".
+var actionPathWords = []string{
+	"desinscri", "sinscri", "desuscri", "desabon", "sabonn", "abmeld", "abbestell", "austragen",
+	"uitschrijv", "afmeld", "opzeg", "cancella", "disiscri", "annulla", "darse-de-baja", "darse_de_baja",
+	"baja", "descadastr", "desinscrev", "avregistr", "avmeld", "avsluta", "odhlas", "wypisz", "rezygn",
+	"abonn", "leiratkoz", "peruuta",
 }
 
 func isActionLink(u string, listUnsub []string) bool {
 	l := strings.ToLower(u)
 	for _, lu := range listUnsub {
-		if strings.EqualFold(u, lu) {
+		if strings.EqualFold(u, lu) || sameEndpoint(u, lu) {
 			return true
 		}
 	}
@@ -43,7 +58,42 @@ func isActionLink(u string, listUnsub []string) bool {
 			return true
 		}
 	}
+	p, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+	rest := strings.ToLower(p.EscapedPath() + "?" + p.RawQuery)
+	if un, err := url.PathUnescape(rest); err == nil {
+		rest += " " + strings.ToLower(un)
+	}
+	for _, w := range actionPathWords {
+		if strings.Contains(rest, w) {
+			return true
+		}
+	}
 	return false
+}
+
+// sameEndpoint reports whether link goes to the same place as an http or
+// https List-Unsubscribe URI: the same host, and a path under the URI's
+// own directory. Platforms put a per-recipient token in the path or query,
+// so the visible link rarely matches the header exactly.
+func sameEndpoint(link, listUnsub string) bool {
+	lu, err := url.Parse(listUnsub)
+	if err != nil || (lu.Scheme != "http" && lu.Scheme != "https") || lu.Host == "" {
+		return false
+	}
+	l, err := url.Parse(link)
+	if err != nil || !strings.EqualFold(l.Hostname(), lu.Hostname()) {
+		return false
+	}
+	path := strings.ToLower(lu.EscapedPath())
+	lp := strings.ToLower(l.EscapedPath())
+	if lp == path {
+		return true
+	}
+	dir := path[:strings.LastIndexByte(path, '/')+1]
+	return dir != "" && dir != "/" && strings.HasPrefix(lp, dir)
 }
 
 // Words in a link's visible text that mean following it does something to
@@ -53,6 +103,13 @@ var actionTextWords = []string{
 	"unsubscribe", "unsub", "opt out", "opt-out", "optout", "preferences", "preference center",
 	"manage subscription", "manage your subscription", "manage subscriptions", "subscription settings",
 	"email settings", "update your profile", "confirm", "remove me", "stop receiving",
+	// Other languages.
+	"abbestellen", "abmelden", "austragen", "désabonner", "desabonner", "désinscri", "desinscri",
+	"se désinscrire", "darse de baja", "dar de baja", "cancelar suscripción", "cancelar la suscripción",
+	"anular suscripción", "uitschrijven", "afmelden", "disiscriviti", "cancella iscrizione",
+	"annulla iscrizione", "annulla l'iscrizione", "descadastrar", "cancelar inscrição",
+	"cancelar subscrição", "avregistrera", "avsluta prenumeration", "afmeld", "avmeld", "odhlásit",
+	"wypisz", "rezygnacja", "leiratkozás", "peruuta tilaus",
 }
 
 func isActionText(text string) bool {
@@ -68,7 +125,8 @@ func isActionText(text string) bool {
 // SafeHTTPClient refuses to connect to loopback, private, link-local, and
 // other non-public addresses, so a message's links cannot reach the
 // checker's own network. It never follows a redirect into an unsubscribe,
-// confirm, or preferences URL.
+// confirm, or preferences URL. Each call has its own transport; call
+// CloseIdleConnections on the client when done with it.
 func SafeHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
@@ -89,6 +147,7 @@ func SafeHTTPClient() *http.Client {
 		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: linkTimeout,
 		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       30 * time.Second,
 	}
 	return &http.Client{
 		Transport: tr,
@@ -157,12 +216,23 @@ func (r *run) checkLinks() {
 	}
 	base := r.opts.HTTPClient
 	if base == nil {
+		// One transport serves the whole analysis, and its idle
+		// connections are closed when the checks are done.
 		base = SafeHTTPClient()
+		defer base.CloseIdleConnections()
 	}
 	unsub := r.listUnsubURIs()
 	stops := &redirectStops{to: map[string]string{}}
 	client := guardRedirects(base, unsub, stops)
 
+	// A URL is an action link if any of its occurrences says so, whatever
+	// the text of the others.
+	action := map[string]bool{}
+	for _, l := range r.parsed.Links {
+		if isActionText(l.Text) || isActionLink(l.Href, unsub) {
+			action[l.Href] = true
+		}
+	}
 	var links, skippedActions []string
 	seen := map[string]bool{}
 	for _, l := range r.parsed.Links {
@@ -171,7 +241,7 @@ func (r *run) checkLinks() {
 			continue
 		}
 		seen[u] = true
-		if isActionLink(u, unsub) || isActionText(l.Text) {
+		if action[u] {
 			skippedActions = append(skippedActions, u)
 			continue
 		}
@@ -185,8 +255,10 @@ func (r *run) checkLinks() {
 		}
 	}
 
-	r.add(r.fetchCheck(client, stops, "content.links", "link", links, skippedActions))
-	r.add(r.fetchCheck(client, stops, "content.images", "image", images, nil))
+	ctx, cancel := context.WithTimeout(r.ctx, linkCheckDeadline)
+	defer cancel()
+	r.add(r.fetchCheck(ctx, client, stops, "content.links", "link", links, skippedActions))
+	r.add(r.fetchCheck(ctx, client, stops, "content.images", "image", images, nil))
 }
 
 // redirectStops records the redirects that were not followed because they
@@ -235,12 +307,15 @@ func fetchable(u string) bool {
 	return err == nil && (p.Scheme == "http" || p.Scheme == "https") && p.Host != ""
 }
 
-func (r *run) fetchCheck(client *http.Client, stops *redirectStops, id, noun string, urls, actions []string) verdict.Check {
+// fetchCheck fetches the URLs and reports the broken ones. A URL still
+// unfinished when ctx ends is not checked, which is not the same as broken.
+func (r *run) fetchCheck(ctx context.Context, client *http.Client, stops *redirectStops, id, noun string, urls, actions []string) verdict.Check {
 	truncated := false
 	if len(urls) > maxLinkChecks {
 		urls, truncated = urls[:maxLinkChecks], true
 	}
 	results := make([]linkResult, len(urls))
+	unfinished := make([]bool, len(urls))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, linkConcurrency)
 	for i, u := range urls {
@@ -249,14 +324,24 @@ func (r *run) fetchCheck(client *http.Client, stops *redirectStops, id, noun str
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[i] = fetch(r.ctx, client, u)
+			if ctx.Err() != nil {
+				results[i], unfinished[i] = linkResult{URL: u}, true
+				return
+			}
+			results[i] = fetch(ctx, client, u)
+			unfinished[i] = results[i].Error != "" && ctx.Err() != nil
 		}()
 	}
 	wg.Wait()
 
 	var broken []linkResult
 	var stopped []map[string]string
-	for _, res := range results {
+	var notChecked []string
+	for i, res := range results {
+		if unfinished[i] {
+			notChecked = append(notChecked, res.URL)
+			continue
+		}
 		if to, ok := stops.get(res.URL); ok {
 			stopped = append(stopped, map[string]string{"url": res.URL, "redirects_to": to})
 			continue
@@ -265,8 +350,12 @@ func (r *run) fetchCheck(client *http.Client, stops *redirectStops, id, noun str
 			broken = append(broken, res)
 		}
 	}
-	ev := map[string]any{"checked": len(urls)}
+	checked := len(urls) - len(notChecked)
+	ev := map[string]any{"checked": checked}
 	capped(ev, "broken", broken)
+	if len(notChecked) > 0 {
+		capped(ev, "not_checked", notChecked)
+	}
 	if len(actions) > 0 {
 		capped(ev, "not_followed", actions)
 	}
@@ -280,11 +369,23 @@ func (r *run) fetchCheck(client *http.Client, stops *redirectStops, id, noun str
 	switch {
 	case len(urls) == 0:
 		c.Status, c.Title = verdict.Info, "No "+noun+"s to check"
-	case len(broken) == 0:
-		c.Status, c.Title = verdict.Pass, fmt.Sprintf("All %d %ss load", len(urls), noun)
-	default:
-		c.Status, c.Title = verdict.Fail, fmt.Sprintf("%d of %d %ss are broken", len(broken), len(urls), noun)
+	case len(broken) > 0:
+		c.Status, c.Title = verdict.Fail, fmt.Sprintf("%d of %d %ss are broken", len(broken), checked, noun)
+		if len(notChecked) > 0 {
+			c.Title = fmt.Sprintf("%d of %d checked %ss are broken", len(broken), checked, noun)
+			c.Detail = fmt.Sprintf("%s could not be checked before the time for link checks ran out.", plural(len(notChecked), noun))
+		}
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Fix or remove the broken " + noun + "s before sending."}
+	case len(notChecked) > 0:
+		reason := fmt.Sprintf("The time for link checks ran out with %d of %d %ss not checked.", len(notChecked), len(urls), noun)
+		if checked > 0 {
+			reason += fmt.Sprintf(" The %d that were checked load.", checked)
+		}
+		c = skipped(id, verdict.Content, fmt.Sprintf("Not every %s could be checked", noun), reason)
+		c.Evidence = r.noteLimit(ev)
+	default:
+		c = r.partial(verdict.Check{ID: id, Category: verdict.Content, Status: verdict.Pass,
+			Title: fmt.Sprintf("All %d %ss load", len(urls), noun), Evidence: c.Evidence})
 	}
 	return c
 }

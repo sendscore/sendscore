@@ -13,15 +13,18 @@ import (
 	"net/mail"
 	"net/textproto"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html/charset"
 )
 
 // maxParts bounds the MIME walk, so a hostile message cannot make the engine
-// recurse or allocate without limit.
+// recurse or allocate without limit. maxPartHeaders bounds the header
+// fields of one part, which real mail keeps to a handful.
 const (
-	maxParts = 64
-	maxDepth = 8
+	maxParts       = 64
+	maxDepth       = 8
+	maxPartHeaders = 100
 )
 
 // header is one raw header field, in message order, unfolded.
@@ -37,9 +40,15 @@ type message struct {
 	Header  mail.Header
 	HTML    string
 	Text    string
-	// MIMEErr is set when the body could not be walked cleanly. The headers
-	// are still usable.
+	// MIMEErr is set when some part of the body could not be read. It joins
+	// one error per bad part; the walk goes on past each, so the parts after
+	// it are still read. The headers are still usable.
 	MIMEErr error
+	// MIMENotes lists problems that were worked around without losing a
+	// part's content, such as a malformed Content-Type parameter, or that
+	// stopped the walk early without the message being malformed, such as
+	// more parts than are read.
+	MIMENotes []string
 	// Attachments names the parts sent as attachments.
 	Attachments []string
 }
@@ -60,8 +69,9 @@ func parseMessage(raw []byte) (*message, error) {
 	}
 	m.Header = msg.Header
 
-	parts := 0
-	m.MIMEErr = m.walk(textproto.MIMEHeader(msg.Header), msg.Body, 0, &parts)
+	w := &walker{m: m}
+	w.walk(textproto.MIMEHeader(msg.Header), msg.Body, 0)
+	m.MIMEErr = errors.Join(w.errs...)
 	return m, nil
 }
 
@@ -85,41 +95,74 @@ func (m *message) all(name string) []string {
 	return out
 }
 
-func (m *message) walk(h textproto.MIMEHeader, body io.Reader, depth int, parts *int) error {
-	*parts++
-	if *parts > maxParts {
-		return errors.New("too many MIME parts")
+// walker carries one MIME walk. A problem in one part is recorded and the
+// walk moves on, so one bad part does not hide the rest of the message.
+type walker struct {
+	m     *message
+	parts int
+	errs  []error
+	// full is set once maxParts parts have been read; the rest are left.
+	full bool
+}
+
+func (w *walker) note(format string, args ...any) {
+	w.m.MIMENotes = append(w.m.MIMENotes, fmt.Sprintf(format, args...))
+}
+
+func (w *walker) walk(h textproto.MIMEHeader, body io.Reader, depth int) {
+	m := w.m
+	if w.full {
+		return
 	}
+	if w.parts >= maxParts {
+		w.full = true
+		w.note("The message has more than %d MIME parts, and only the first %d were read.", maxParts, maxParts)
+		return
+	}
+	w.parts++
 	if depth > maxDepth {
-		return errors.New("MIME parts nested too deeply")
+		w.errs = append(w.errs, fmt.Errorf("MIME parts nested more than %d deep", maxDepth))
+		return
+	}
+	if len(h) > maxPartHeaders {
+		w.errs = append(w.errs, fmt.Errorf("a MIME part has more than %d header fields", maxPartHeaders))
+		return
 	}
 	ct := h.Get("Content-Type")
 	if ct == "" {
 		ct = "text/plain; charset=us-ascii"
 	}
 	mediaType, params, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return fmt.Errorf("bad Content-Type %q: %w", ct, err)
+	if errors.Is(err, mime.ErrInvalidMediaParameter) {
+		// The media type is still good. Keep the parameters that parse.
+		params = lenientParams(ct)
+		w.note("The Content-Type %q has a malformed parameter, which was ignored.", truncate(ct, 80))
+	} else if err != nil {
+		w.errs = append(w.errs, fmt.Errorf("bad Content-Type %q: %w", truncate(ct, 80), err))
+		return
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
 		boundary := params["boundary"]
 		if boundary == "" {
-			return fmt.Errorf("%s has no boundary", mediaType)
+			w.errs = append(w.errs, fmt.Errorf("%s has no boundary", mediaType))
+			return
 		}
 		mr := multipart.NewReader(body, boundary)
-		for {
+		for !w.full {
 			p, err := mr.NextRawPart()
 			if err == io.EOF {
-				return nil
+				return
 			}
 			if err != nil {
-				return fmt.Errorf("reading %s: %w", mediaType, err)
+				// The reader cannot find the next boundary, so nothing
+				// more of this multipart can be read.
+				w.errs = append(w.errs, fmt.Errorf("reading %s: %w", mediaType, err))
+				return
 			}
-			if err := m.walk(p.Header, p, depth+1, parts); err != nil {
-				return err
-			}
+			w.walk(p.Header, p, depth+1)
 		}
+		return
 	}
 
 	if disp := h.Get("Content-Disposition"); strings.HasPrefix(strings.ToLower(disp), "attachment") {
@@ -128,14 +171,16 @@ func (m *message) walk(h textproto.MIMEHeader, body io.Reader, depth int, parts 
 			name = dp["filename"]
 		}
 		m.Attachments = append(m.Attachments, name)
-		return nil
+		return
 	}
 	if mediaType != "text/html" && mediaType != "text/plain" {
-		return nil
+		return
 	}
+	// A part that fails to decode partway keeps what decoded, which is
+	// what a lenient mail client shows.
 	decoded, err := decodeBody(body, h.Get("Content-Transfer-Encoding"), params["charset"])
 	if err != nil {
-		return fmt.Errorf("decoding %s: %w", mediaType, err)
+		w.errs = append(w.errs, fmt.Errorf("decoding %s: %w", mediaType, err))
 	}
 	// The first part of each kind is the one a mail client shows.
 	if mediaType == "text/html" && m.HTML == "" {
@@ -143,7 +188,29 @@ func (m *message) walk(h textproto.MIMEHeader, body io.Reader, depth int, parts 
 	} else if mediaType == "text/plain" && m.Text == "" {
 		m.Text = decoded
 	}
-	return nil
+}
+
+// lenientParams reads the "; key=value" parameters of a header value one
+// at a time, keeping those that parse, for a value mime.ParseMediaType
+// rejects as a whole.
+func lenientParams(v string) map[string]string {
+	out := map[string]string{}
+	_, rest, _ := strings.Cut(v, ";")
+	for _, part := range strings.Split(rest, ";") {
+		k, val, ok := strings.Cut(part, "=")
+		k = strings.ToLower(strings.TrimSpace(k))
+		if !ok || k == "" || strings.ContainsAny(k, " \t\"()<>@,:/[]?") {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		if _, dup := out[k]; !dup && val != "" {
+			out[k] = val
+		}
+	}
+	return out
 }
 
 func decodeBody(r io.Reader, cte, cs string) (string, error) {
@@ -265,16 +332,32 @@ func truncate(s string, n int) string {
 }
 
 // addrDomain returns the lowercased domain of an address such as
-// "Name <a@b.com>" or "<a@b.com>".
+// "Name <a@b.com>" or "<a@b.com>". For a list of addresses it uses the
+// first. A value that does not parse gives a domain only when it is plainly
+// one bare address, never a domain cut out of a longer string.
 func addrDomain(s string) string {
 	s = strings.TrimSpace(s)
-	if a, err := mail.ParseAddress(s); err == nil {
-		s = a.Address
+	p := mail.AddressParser{WordDecoder: wordDecoder}
+	if list, err := p.ParseList(s); err == nil && len(list) > 0 {
+		s = list[0].Address
+	} else {
+		s = strings.TrimSuffix(strings.TrimPrefix(s, "<"), ">")
+		if strings.ContainsAny(s, " \t,;<>\"()") || strings.Count(s, "@") != 1 {
+			return ""
+		}
 	}
-	s = strings.Trim(s, "<>")
 	_, d, ok := strings.Cut(s, "@")
 	if !ok {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSuffix(d, "."))
+	d = strings.ToLower(strings.TrimSuffix(d, "."))
+	if strings.ContainsFunc(d, unicode.IsSpace) || strings.ContainsAny(d, "@<>,;\"()[]\\") {
+		return ""
+	}
+	for _, label := range strings.Split(d, ".") {
+		if label == "" {
+			return ""
+		}
+	}
+	return d
 }

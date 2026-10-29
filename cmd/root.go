@@ -13,12 +13,18 @@ import (
 // version is set with -ldflags at release time.
 var version = "dev"
 
-// Exit codes. A script can tell "warnings only" from "something failed".
+// Exit codes. A script can tell "warnings only" from "something failed",
+// and a bad invocation from input that could not be checked. 64 and up
+// follow sysexits.h.
 const (
-	ExitOK    = 0
-	ExitWarn  = 1
-	ExitFail  = 2
-	ExitUsage = 64
+	ExitOK       = 0
+	ExitWarn     = 1
+	ExitFail     = 2
+	ExitUsage    = 64 // bad flags or arguments
+	ExitDataErr  = 65 // the input is not an email message, or is too large
+	ExitNoInput  = 66 // the input file cannot be read
+	ExitSoftware = 70 // an internal error
+	ExitIOErr    = 74 // the report could not be written
 )
 
 // ExitError carries an exit code out of a command.
@@ -26,6 +32,8 @@ type ExitError struct {
 	Code int
 	Err  error
 }
+
+func (e *ExitError) Unwrap() error { return e.Err }
 
 func (e *ExitError) Error() string {
 	if e.Err == nil {
@@ -56,6 +64,15 @@ func Execute() error {
 	return newRoot().Execute()
 }
 
+// withCode gives err an exit code, unless it is nil or already has one.
+func withCode(code int, err error) error {
+	var exitErr *ExitError
+	if err == nil || errors.As(err, &exitErr) {
+		return err
+	}
+	return &ExitError{Code: code, Err: err}
+}
+
 // ExitCode turns the error from Execute into the process exit code.
 func ExitCode(err error, stderr io.Writer) int {
 	if err == nil {
@@ -64,7 +81,7 @@ func ExitCode(err error, stderr io.Writer) int {
 	var exitErr *ExitError
 	if errors.As(err, &exitErr) {
 		if exitErr.Err != nil {
-			fmt.Fprintln(stderr, exitErr.Err)
+			fmt.Fprintf(stderr, "Error: %v\n", exitErr.Err)
 		}
 		return exitErr.Code
 	}

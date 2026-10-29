@@ -47,6 +47,10 @@ type parsedHTML struct {
 	Active []string
 	// Text is the visible text: no tags, comments, styles, or scripts.
 	Text string
+	// Prose is the visible text outside code, pre, kbd, and samp elements,
+	// and Code is the text inside them. Code samples quote template syntax
+	// on purpose, so merge tags are looked for in Prose only.
+	Prose, Code string
 	// Body is the visible text without footer blocks (unsubscribe,
 	// address, and consent lines), which every bulk platform adds.
 	Body string
@@ -166,7 +170,8 @@ func parseHTML(s string) *parsedHTML {
 	p := &parsedHTML{}
 	z := html.NewTokenizer(strings.NewReader(s))
 	var open *link
-	var linkText, words, text, block, attrs strings.Builder
+	var linkText, words, text, prose, code, block, attrs strings.Builder
+	inCode := 0
 	var blocks []string
 	active := map[string]bool{}
 	addActive := func(name string) {
@@ -201,6 +206,8 @@ func parseHTML(s string) *parsedHTML {
 		case html.ErrorToken:
 			endBlock()
 			p.Text = collapse(text.String())
+			p.Prose = collapse(prose.String())
+			p.Code = code.String()
 			p.Body = bodyText(blocks)
 			p.Attrs = attrs.String()
 			return p
@@ -216,6 +223,10 @@ func parseHTML(s string) *parsedHTML {
 				}
 			case "body":
 				inHead = false
+			case "code", "pre", "kbd", "samp":
+				if tt == html.StartTagToken {
+					inCode++
+				}
 			case "title", "style":
 				if tt == html.StartTagToken {
 					skip++
@@ -262,6 +273,13 @@ func parseHTML(s string) *parsedHTML {
 			t := z.Text()
 			text.Write(t)
 			text.WriteByte(' ')
+			if inCode > 0 {
+				code.Write(t)
+				code.WriteByte('\n')
+			} else {
+				prose.Write(t)
+				prose.WriteByte(' ')
+			}
 			block.Write(t)
 			block.WriteByte(' ')
 			if open != nil {
@@ -277,6 +295,10 @@ func parseHTML(s string) *parsedHTML {
 			switch n {
 			case "head":
 				inHead = false
+			case "code", "pre", "kbd", "samp":
+				if inCode > 0 {
+					inCode--
+				}
 			case "title", "style", "script":
 				if skip > 0 {
 					skip--
@@ -363,8 +385,9 @@ var placeholderPatterns = []struct {
 	{regexp.MustCompile(`\*\|[A-Z0-9_:]{1,40}\|\*`), 0},         // Mailchimp
 	{regexp.MustCompile(`%%[A-Za-z_][A-Za-z0-9_.]{0,40}%%`), 0}, // Salesforce, Buttondown style
 	{regexp.MustCompile(`\[[A-Z]+_[A-Z_]+\]`), 0},               // [FIRST_NAME]
-	// Ghost: {first_name} or {first_name, "there"}, not inside {{ }}.
-	{regexp.MustCompile(`(?:^|[^{])(\{(?:first_name|name|email)(?:,\s*"[^"\n]{0,40}")?\})`), 1},
+	// Ghost: {first_name} or {first_name, "there"}, not inside {{ }} and
+	// not a ${name} template literal.
+	{regexp.MustCompile(`(?:^|[^{$])(\{(?:first_name|name|email)(?:,\s*"[^"\n]{0,40}")?\})`), 1},
 }
 
 func (r *run) content() {
@@ -474,11 +497,24 @@ func (r *run) checkPlaceholders() {
 	var found []string
 	seen := map[string]bool{}
 	total := 0
-	for _, body := range []string{r.msg.get("Subject"), r.msg.Text, r.parsed.Text, r.parsed.Attrs} {
+	// The plain text part repeats the HTML's code samples without marking
+	// them, so a tag there that also appears in an HTML code sample is
+	// part of the sample.
+	bodies := []struct {
+		text     string
+		skipCode bool
+	}{
+		{r.msg.get("Subject"), false}, {r.msg.Text, true}, {r.parsed.Prose, false}, {r.parsed.Attrs, false},
+	}
+	if r.msg.HTML == "" {
+		bodies[2].text = r.parsed.Text
+	}
+	for _, body := range bodies {
 		for _, p := range placeholderPatterns {
-			for _, m := range p.re.FindAllStringSubmatch(body, -1) {
-				tag := m[p.group]
-				if seen[tag] {
+			for _, m := range p.re.FindAllStringSubmatchIndex(body.text, -1) {
+				start, end := m[2*p.group], m[2*p.group+1]
+				tag := body.text[start:end]
+				if seen[tag] || inFString(body.text, start) || (body.skipCode && strings.Contains(r.parsed.Code, tag)) {
 					continue
 				}
 				seen[tag] = true
@@ -505,6 +541,32 @@ func (r *run) checkPlaceholders() {
 	})
 }
 
+// inFString reports whether the brace at i is inside a Python f-string
+// literal such as f"Hello {name}" on the same line and close before it.
+func inFString(s string, i int) bool {
+	if i == 0 || s[i] != '{' {
+		return false
+	}
+	lineStart := max(strings.LastIndexByte(s[:i], '\n')+1, i-80)
+	line := s[lineStart:i]
+	for _, q := range []string{`"`, "'"} {
+		for _, prefix := range []string{"f", "F", "rf", "fr", "Rf", "fR"} {
+			open := strings.LastIndex(line, prefix+q)
+			if open < 0 || (open > 0 && isIdentByte(line[open-1])) {
+				continue
+			}
+			if !strings.Contains(line[open+len(prefix)+1:], q) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 // visibleText is the HTML without tags, comments, styles, or scripts, so a
 // template's own CSS braces are not mistaken for merge tags.
 func visibleText(s string) string {
@@ -517,23 +579,25 @@ func visibleText(s string) string {
 func (r *run) checkInsecureLinks() {
 	var insecure []string
 	for _, l := range r.parsed.Links {
-		if strings.HasPrefix(strings.ToLower(l.Href), "http://") && len(insecure) < 20 {
+		if strings.HasPrefix(strings.ToLower(l.Href), "http://") {
 			insecure = append(insecure, l.Href)
 		}
 	}
 	for _, im := range r.parsed.Images {
-		if strings.HasPrefix(strings.ToLower(im.Src), "http://") && len(insecure) < 20 {
+		if strings.HasPrefix(strings.ToLower(im.Src), "http://") {
 			insecure = append(insecure, im.Src)
 		}
 	}
 	if len(insecure) == 0 {
-		r.add(verdict.Check{ID: "content.insecure_links", Category: verdict.Content, Status: verdict.Pass, Title: "Every link and image uses https"})
+		r.add(r.partial(verdict.Check{ID: "content.insecure_links", Category: verdict.Content, Status: verdict.Pass, Title: "Every link and image uses https"}))
 		return
 	}
+	ev := map[string]any{}
+	capped(ev, "urls", insecure)
 	r.add(verdict.Check{
 		ID: "content.insecure_links", Category: verdict.Content, Status: verdict.Warn,
 		Title:    "Some links or images use http",
-		Evidence: map[string]any{"urls": insecure},
+		Evidence: r.noteLimit(ev),
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Change these to https. Some clients block http images, and browsers warn on http links."},
 	})
 }
@@ -546,20 +610,22 @@ func (r *run) checkImageAlt() {
 			continue
 		}
 		content++
-		if im.Alt == nil && len(missing) < 20 {
+		if im.Alt == nil {
 			missing = append(missing, im.Src)
 		}
 	}
 	switch {
 	case content == 0:
-		r.add(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Info, Title: "No content images"})
+		r.add(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Info, Title: "No content images", Evidence: r.noteLimit(nil)})
 	case len(missing) == 0:
-		r.add(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Pass, Title: "Every image has alt text"})
+		r.add(r.partial(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Pass, Title: "Every image has alt text"}))
 	default:
+		ev := map[string]any{}
+		capped(ev, "images", missing)
 		r.add(verdict.Check{
 			ID: "content.image_alt", Category: verdict.Content, Status: verdict.Warn,
 			Title:    "Images without alt text",
-			Evidence: map[string]any{"images": missing},
+			Evidence: r.noteLimit(ev),
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Add alt text. Many readers have images off by default, and screen readers need it."},
 		})
 	}

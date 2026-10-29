@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"time"
 
 	"blitiri.com.ar/go/spf"
 	"github.com/emersion/go-msgauth/dkim"
@@ -39,6 +41,9 @@ type dkimResult struct {
 	KeyType    string
 	KeyBits    int
 	Aligned    bool
+	// ExpiredAfterReceipt is a signature whose x= has passed now but had not
+	// when the message was received, so it can no longer be verified.
+	ExpiredAfterReceipt bool
 }
 
 func (d dkimResult) evidence() map[string]any {
@@ -54,6 +59,9 @@ func (d dkimResult) evidence() map[string]any {
 	}
 	if d.Error != "" {
 		e["error"] = d.Error
+	}
+	if d.ExpiredAfterReceipt {
+		e["expired_after_receipt"] = true
 	}
 	return e
 }
@@ -80,6 +88,23 @@ func (r *run) auth() {
 func (r *run) lookupTXT(name string) ([]string, error) {
 	return r.res.LookupTXT(r.ctx, name)
 }
+
+// dkimLookupTXT marks every failed key lookup temporary. go-msgauth calls
+// any lookup error that is not a temporary net.Error a missing key, so a
+// canceled, timed out, or refused query would read as a broken signature.
+func (r *run) dkimLookupTXT(name string) ([]string, error) {
+	txts, err := r.lookupTXT(name)
+	if lookupFailed(err) != "" {
+		return nil, tempLookupError{err}
+	}
+	return txts, err
+}
+
+type tempLookupError struct{ error }
+
+func (tempLookupError) Timeout() bool   { return false }
+func (tempLookupError) Temporary() bool { return true }
+func (e tempLookupError) Unwrap() error { return e.error }
 
 // orgDomain is the registrable domain DMARC's relaxed alignment compares.
 func orgDomain(d string) string {
@@ -135,7 +160,7 @@ func (r *run) verifyDKIM() {
 	}
 
 	verifs, err := dkim.VerifyWithOptions(bytes.NewReader(r.msg.Raw), &dkim.VerifyOptions{
-		LookupTXT:        r.lookupTXT,
+		LookupTXT:        r.dkimLookupTXT,
 		MaxVerifications: 8,
 	})
 	if err != nil && !errors.Is(err, dkim.ErrTooManySignatures) {
@@ -147,7 +172,8 @@ func (r *run) verifyDKIM() {
 		return
 	}
 
-	offline, temp := 0, 0
+	offline, temp, expired := 0, 0, 0
+	now := time.Now()
 	for i, sig := range sigs {
 		if i >= len(verifs) {
 			break
@@ -165,6 +191,12 @@ func (r *run) verifyDKIM() {
 		d.HeaderKeys = v.HeaderKeys
 		switch {
 		case v.Err == nil:
+		case !v.Expiration.IsZero() && now.After(v.Expiration) && !r.opts.ReceivedAt.After(v.Expiration):
+			// go-msgauth checks x= against the clock, before anything else.
+			// The signature was still valid when the message arrived, so
+			// whether it verified then cannot be known now.
+			d.Result, d.Error, d.ExpiredAfterReceipt = "permerror", v.Err.Error(), true
+			expired++
 		case errors.Is(v.Err, ErrOffline) || strings.Contains(v.Err.Error(), ErrOffline.Error()):
 			// The library wraps lookup errors as text, so match the message.
 			d.Result, d.Error = "temperror", ErrOffline.Error()
@@ -200,8 +232,17 @@ func (r *run) verifyDKIM() {
 		c.Status, c.Title = verdict.Pass, "DKIM signature verified"
 	case offline == len(r.dkim):
 		c = skipped("auth.dkim", verdict.Auth, "DKIM not verified", "Offline: the signing key could not be looked up.")
+		r.authDNS = true
 	case offline+temp == len(r.dkim):
 		c = skipped("auth.dkim", verdict.Auth, "DKIM not verified", "Temporary DNS failure looking up the signing key. Try again.")
+		r.authDNS = true
+	case offline+temp+expired == len(r.dkim):
+		reason := "The signature expired after the message was received, so it can no longer be verified."
+		if offline+temp > 0 {
+			reason += " Looking up the signing key for another signature failed."
+			r.authDNS = true
+		}
+		c = skipped("auth.dkim", verdict.Auth, "DKIM not verified", reason)
 	default:
 		c.Status, c.Title = verdict.Fail, "No DKIM signature verifies"
 		c.Detail = "The message is signed, but no signature checks out against the published key."
@@ -213,23 +254,43 @@ func (r *run) verifyDKIM() {
 	if !passed {
 		return
 	}
-	// Key strength of the signatures that verified.
-	weakest := 0
+	// Key strength of the signatures that verified. When one of them is the
+	// publisher's own, only those count, since the platform's key is not
+	// theirs to rotate.
+	own := false
 	for _, d := range r.dkim {
-		if d.Result == "pass" && d.KeyType == "rsa" && (weakest == 0 || d.KeyBits < weakest) {
-			weakest = d.KeyBits
+		if d.Result == "pass" && orgDomain(d.Domain) == orgDomain(r.fromDom) {
+			own = true
+		}
+	}
+	weakest, weakDom := 0, ""
+	for _, d := range r.dkim {
+		if d.Result != "pass" || d.KeyType != "rsa" || (own && orgDomain(d.Domain) != orgDomain(r.fromDom)) {
+			continue
+		}
+		if weakest == 0 || d.KeyBits < weakest {
+			weakest, weakDom = d.KeyBits, d.Domain
 		}
 	}
 	k := verdict.Check{ID: "auth.dkim_key", Category: verdict.Auth, Evidence: map[string]any{"weakest_rsa_bits": weakest}}
+	if weakDom != "" {
+		k.Evidence["domain"] = weakDom
+	}
+	rotate := func(text string) *verdict.Fix {
+		if own {
+			return &verdict.Fix{Who: verdict.FixedByYou, Text: text}
+		}
+		return &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to rotate the DKIM key for " + weakDom + " to 2048 bits."}
+	}
 	switch {
 	case weakest == 0:
 		k.Status, k.Title = verdict.Info, "DKIM key is not RSA, or could not be sized"
 	case weakest < 1024:
 		k.Status, k.Title = verdict.Fail, fmt.Sprintf("DKIM key is only %d bits", weakest)
-		k.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Rotate to a 2048-bit DKIM key."}
+		k.Fix = rotate("Rotate to a 2048-bit DKIM key.")
 	case weakest < 2048:
 		k.Status, k.Title = verdict.Warn, fmt.Sprintf("DKIM key is %d bits", weakest)
-		k.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Rotate to a 2048-bit DKIM key when you can."}
+		k.Fix = rotate("Rotate to a 2048-bit DKIM key when you can.")
 	default:
 		k.Status, k.Title = verdict.Pass, fmt.Sprintf("DKIM key is %d bits", weakest)
 	}
@@ -322,6 +383,7 @@ func (r *run) checkSPF() {
 		}
 		c = skipped("auth.spf", verdict.Auth, "SPF not checked", reason)
 		r.spfTemp = true
+		r.authDNS = true
 	default:
 		c.Status, c.Title = verdict.Fail, "SPF "+string(res)+" for "+r.spfDom
 		c.Fix = &verdict.Fix{Who: who, Text: "Add your email platform to the SPF record for " + r.spfDom + "."}
@@ -332,8 +394,12 @@ func (r *run) checkSPF() {
 }
 
 // isDNSFailure is a lookup that failed, as opposed to a name that does not
-// exist or an error in the record itself.
+// exist or an error in the record itself. A canceled or expired context
+// counts as a failed lookup.
 func isDNSFailure(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	var dnsErr *net.DNSError
 	return errors.As(err, &dnsErr) && !dnsErr.IsNotFound
 }
@@ -347,6 +413,10 @@ func (r *run) checkSPFLookups() {
 		r.add(skipped("auth.spf_lookups", verdict.Auth, "SPF record not inspected", "No Return-Path or envelope sender to look up."))
 		return
 	}
+	who := verdict.FixedByProvider
+	if orgDomain(r.spfDom) == orgDomain(r.fromDom) {
+		who = verdict.FixedByYou
+	}
 	w := &spfWalk{r: r}
 	err := w.walk(r.spfDom, "")
 	if errors.Is(err, errNoSPF) {
@@ -354,7 +424,7 @@ func (r *run) checkSPFLookups() {
 			ID: "auth.spf_lookups", Category: verdict.Auth, Status: verdict.Fail,
 			Title:    "No SPF record for " + r.spfDom,
 			Evidence: map[string]any{"domain": r.spfDom},
-			Fix:      &verdict.Fix{Who: verdict.FixedByProvider, Text: "Publish an SPF record for " + r.spfDom + " that includes the sending servers."},
+			Fix:      &verdict.Fix{Who: who, Text: "Publish an SPF record for " + r.spfDom + " that includes the sending servers."},
 			Docs:     docsSPF,
 		})
 		return
@@ -376,10 +446,6 @@ func (r *run) checkSPFLookups() {
 	}
 	if len(w.voids) > 0 {
 		c.Evidence["void_names"] = w.voids
-	}
-	who := verdict.FixedByProvider
-	if orgDomain(r.spfDom) == orgDomain(r.fromDom) {
-		who = verdict.FixedByYou
 	}
 	const permerror = "Receivers treat this as a permanent SPF error, so SPF fails for every message."
 	switch {
@@ -406,7 +472,7 @@ func (r *run) checkSPFLookups() {
 		}
 	case w.lookups > spfLookupLimit:
 		c.Status, c.Title, c.Detail = verdict.Fail, "SPF needs more than 10 DNS lookups", permerror
-		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Remove includes you no longer use from the SPF record for " + r.spfDom + "."}
+		c.Fix = &verdict.Fix{Who: who, Text: "Remove includes that are no longer used from the SPF record for " + r.spfDom + "."}
 	case w.lookups >= 8:
 		c.Status, c.Title = verdict.Warn, fmt.Sprintf("SPF needs %d of 10 DNS lookups", w.lookups)
 		c.Detail = "One more include will break SPF for every message."
@@ -598,14 +664,17 @@ func spfMechanism(t string) (string, string) {
 	return name, target
 }
 
-var errMultipleDMARC = errors.New("more than one DMARC record")
+var (
+	errMultipleDMARC = errors.New("more than one DMARC record")
+	errNoFromDomain  = errors.New("The message has no From domain.")
+)
 
 // lookupDMARC finds the policy for the From domain, falling back to its
 // organizational domain (RFC 7489, section 6.6.3). More than one record at a
 // name ends discovery, and no policy applies.
 func (r *run) lookupDMARC() (*dmarcRecord, error) {
 	if r.fromDom == "" {
-		return nil, errors.New("The message has no From domain.")
+		return nil, errNoFromDomain
 	}
 	domains := []string{r.fromDom}
 	if org := orgDomain(r.fromDom); org != r.fromDom {
@@ -656,6 +725,9 @@ func (r *run) dmarcUnknown() string {
 	if rec != nil || err == nil || errors.Is(err, dmarc.ErrNoPolicy) {
 		return ""
 	}
+	if errors.Is(err, errNoFromDomain) {
+		return err.Error()
+	}
 	if reason := lookupFailed(err); reason != "" {
 		return reason
 	}
@@ -664,6 +736,9 @@ func (r *run) dmarcUnknown() string {
 
 func (r *run) checkDMARCRecord() {
 	if reason := r.dmarcUnknown(); reason != "" {
+		if !errors.Is(r.dmarcErr, errNoFromDomain) {
+			r.authDNS = true
+		}
 		r.add(skipped("auth.dmarc_record", verdict.Auth, "DMARC record not checked", reason))
 		return
 	}
@@ -698,13 +773,24 @@ func (r *run) checkDMARCRecord() {
 }
 
 // authAlignment is what DMARC needs from DKIM and SPF. unknown is set when a
-// DNS failure hid a result that could have aligned, so neither a pass nor a
-// failure can be claimed.
+// result that could have aligned was hidden, by a DNS failure, a missing
+// envelope, or a signature that has since expired, so neither a pass nor a
+// failure can be claimed. why says what was hidden.
 type authAlignment struct {
 	dkim, spf bool
 	unknown   bool
+	why       []string
+	// dkimUnknown is an aligned signature that could not be verified.
+	dkimUnknown bool
 	// dkimBroken is a signature for the From domain that did not verify.
 	dkimBroken string
+}
+
+func (a *authAlignment) hidden(why string) {
+	a.unknown = true
+	if !slices.Contains(a.why, why) {
+		a.why = append(a.why, why)
+	}
 }
 
 func (r *run) alignment() authAlignment {
@@ -713,24 +799,34 @@ func (r *run) alignment() authAlignment {
 		if !aligned(d.Domain, r.fromDom, r.dkimMode()) {
 			continue
 		}
-		switch d.Result {
-		case "pass":
+		switch {
+		case d.Result == "pass":
 			a.dkim = true
-		case "temperror":
-			a.unknown = true
+		case d.Result == "temperror":
+			a.dkimUnknown = true
+			a.hidden("The DKIM signature for " + d.Domain + " could not be verified because DNS failed or was offline.")
+		case d.ExpiredAfterReceipt:
+			a.dkimUnknown = true
+			a.hidden("The DKIM signature for " + d.Domain + " expired after the message was received, so it can no longer be verified.")
 		default:
 			a.dkimBroken = d.Domain
 		}
 	}
-	a.spf = r.spfRes == verdict.Pass && aligned(r.spfDom, r.fromDom, r.spfMode())
-	if r.spfTemp && aligned(r.spfDom, r.fromDom, r.spfMode()) {
-		a.unknown = true
+	spfAligns := aligned(r.spfDom, r.fromDom, r.spfMode())
+	a.spf = r.spfRes == verdict.Pass && spfAligns
+	switch {
+	case r.spfTemp && spfAligns:
+		a.hidden("SPF for " + r.spfDom + " could not be checked because DNS failed or was offline.")
+	case r.spfRes == verdict.Skipped && !r.spfTemp && spfAligns:
+		// A saved message has no envelope, but its Return-Path aligns, so
+		// SPF could have passed DMARC when it was delivered.
+		a.hidden("SPF was not checked because there is no envelope, and the Return-Path domain " + r.spfDom + " aligns with the From domain.")
 	}
 	if r.fp.Auth["dkim"] == verdict.Skipped && r.spfRes == verdict.Skipped {
-		a.unknown = true
+		a.hidden("Neither DKIM nor SPF could be checked.")
 	}
 	if a.dkim || a.spf {
-		a.unknown = false
+		a.unknown, a.why = false, nil
 	}
 	return a
 }
@@ -750,6 +846,8 @@ func (r *run) checkDMARC() {
 		dkimFix = &verdict.Fix{Who: verdict.FixedByProvider, Text: dkimBrokenFix}
 	}
 	switch {
+	case errors.Is(r.dmarcErr, errNoFromDomain):
+		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The message has no From domain to check DMARC for.")
 	case r.dmarcUnknown() != "":
 		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The DMARC record could not be read. "+r.dmarcUnknown())
 	case !hasPolicy:
@@ -758,7 +856,7 @@ func (r *run) checkDMARC() {
 	case a.dkim || a.spf:
 		c.Status, c.Title = verdict.Pass, "DMARC passes"
 	case a.unknown:
-		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "DKIM or SPF could not be checked because DNS failed or was offline, and either could have aligned. Try again.")
+		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", strings.Join(a.why, " ")+" Whether DMARC passes is unknown until that can be checked.")
 	case r.spfRes == verdict.Skipped:
 		c.Status, c.Title = verdict.Fail, "DMARC does not align through DKIM"
 		if a.dkimBroken != "" {
@@ -793,6 +891,8 @@ func (r *run) checkAlignment() {
 	switch {
 	case a.dkim:
 		c.Status, c.Title = verdict.Pass, "DKIM aligns with the From domain"
+	case a.spf && a.dkimUnknown:
+		c = skipped("auth.alignment", verdict.Auth, "DKIM alignment not checked", "SPF aligns with the From domain, but a DKIM signature for the From domain could not be verified, so whether DKIM aligns is unknown.")
 	case a.spf:
 		c.Status, c.Title = verdict.Warn, "Only SPF aligns with the From domain"
 		c.Detail = "SPF alignment breaks when a subscriber forwards the message. DKIM alignment survives it."
@@ -805,6 +905,9 @@ func (r *run) checkAlignment() {
 	}
 	r.add(c)
 }
+
+// maxPTRNames is how many reverse DNS names checkPTR looks up.
+const maxPTRNames = 10
 
 func (r *run) checkPTR() {
 	ip := r.opts.Envelope.RemoteIP
@@ -819,12 +922,22 @@ func (r *run) checkPTR() {
 	}
 	c := verdict.Check{
 		ID: "auth.ptr", Category: verdict.Auth, Docs: docsGmail,
-		Evidence: map[string]any{"ip": ip.String(), "ptr": names},
+		Evidence: map[string]any{"ip": ip.String()},
 		Fix:      &verdict.Fix{Who: verdict.FixedByProvider, Text: "The sending server needs reverse DNS that resolves back to its own address. Only your email platform can set this."},
 	}
-	for _, n := range names {
+	capped(c.Evidence, "ptr", names)
+	// The sender controls its reverse zone, so only the first names are
+	// looked up, as RFC 7208 section 5.5 does.
+	lookup := names
+	if len(lookup) > maxPTRNames {
+		lookup = lookup[:maxPTRNames]
+		c.Detail = fmt.Sprintf("Only the first %d of %d reverse DNS names were looked up.", maxPTRNames, len(names))
+	}
+	var failed error
+	for _, n := range lookup {
 		addrs, err := r.res.LookupIPAddr(r.ctx, strings.TrimSuffix(n, "."))
-		if err != nil {
+		if lookupFailed(err) != "" {
+			failed = err
 			continue
 		}
 		for _, a := range addrs {
@@ -835,6 +948,10 @@ func (r *run) checkPTR() {
 				return
 			}
 		}
+	}
+	if failed != nil {
+		r.add(skipped("auth.ptr", verdict.Auth, "Reverse DNS not checked", lookupFailed(failed)))
+		return
 	}
 	if len(names) == 0 {
 		c.Status, c.Title = verdict.Fail, "Sending IP has no reverse DNS"

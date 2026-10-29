@@ -28,9 +28,16 @@ func Compare(prev, cur *verdict.Fingerprint) []verdict.Change {
 
 	for _, name := range []string{"dkim", "spf", "dmarc"} {
 		before, after := prev.Auth[name], cur.Auth[name]
-		if before == verdict.Pass && after != verdict.Pass && after != verdict.Skipped && after != "" {
-			add("auth."+name, before, after, "auth."+name)
+		if before != verdict.Pass || after == verdict.Pass {
+			continue
 		}
+		// A result that was not checked this time is a change, but not
+		// evidence that anything got worse.
+		w := "auth." + name
+		if after == verdict.Skipped || after == "" {
+			w = ""
+		}
+		add("auth."+name, before, after, w)
 	}
 	if listChanged(prev.DKIMDomains, cur.DKIMDomains) {
 		add("dkim.d", strings.Join(prev.DKIMDomains, ", "), strings.Join(cur.DKIMDomains, ", "), "")

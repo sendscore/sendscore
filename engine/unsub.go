@@ -1,16 +1,34 @@
 package engine
 
 import (
+	"fmt"
+	"net/textproto"
 	"strings"
 
 	"github.com/sendscore/sendscore/verdict"
 )
 
-// listUnsubURIs returns the URIs in List-Unsubscribe, in order. RFC 2369
-// encloses each in angle brackets, so a comma inside one is part of the URI.
-// Comments in parentheses are ignored, and so is whitespace inside a URI.
+// listUnsubURIs returns the URIs in every List-Unsubscribe header, in order.
+// RFC 2369 encloses each in angle brackets, so a comma inside one is part of
+// the URI. Comments in parentheses are ignored, and so is whitespace inside a
+// URI.
 func (r *run) listUnsubURIs() []string {
-	return parseListURIs(r.msg.Header.Get("List-Unsubscribe"))
+	var out []string
+	for _, h := range r.msg.Header[textproto.CanonicalMIMEHeaderKey("List-Unsubscribe")] {
+		out = append(out, parseListURIs(h)...)
+	}
+	return out
+}
+
+// lastHeader returns the last instance of a header and how many there are.
+// DKIM signs instances from the bottom up, so the last is the one a
+// signature covers (RFC 6376, section 5.4.2).
+func (r *run) lastHeader(name string) (string, int) {
+	vs := r.msg.Header[textproto.CanonicalMIMEHeaderKey(name)]
+	if len(vs) == 0 {
+		return "", 0
+	}
+	return strings.TrimSpace(vs[len(vs)-1]), len(vs)
 }
 
 func parseListURIs(h string) []string {
@@ -40,8 +58,9 @@ func parseListURIs(h string) []string {
 }
 
 func (r *run) unsubscribe() {
-	uris := r.listUnsubURIs()
-	present := strings.TrimSpace(r.msg.Header.Get("List-Unsubscribe")) != ""
+	last, count := r.lastHeader("List-Unsubscribe")
+	uris := parseListURIs(last)
+	present := last != ""
 	https := ""
 	mailto, http := false, false
 	for _, u := range uris {
@@ -58,8 +77,16 @@ func (r *run) unsubscribe() {
 	}
 	r.fp.ListUnsubscribe = len(uris) > 0
 
-	c := verdict.Check{ID: "unsub.header", Category: verdict.Unsub, Docs: docsGmail, Evidence: map[string]any{"uris": uris}}
+	c := verdict.Check{ID: "unsub.header", Category: verdict.Unsub, Docs: docsGmail, Evidence: map[string]any{}}
+	capped(c.Evidence, "uris", uris)
+	if count > 1 {
+		c.Evidence["headers"] = count
+	}
 	switch {
+	case count > 1:
+		c.Status, c.Title = verdict.Fail, "More than one List-Unsubscribe header"
+		c.Detail = "A DKIM signature covers only the last one, so a header added after signing could point subscribers somewhere else. These are the links in the last one."
+		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to send exactly one List-Unsubscribe header."}
 	case https != "":
 		c.Status, c.Title = verdict.Pass, "List-Unsubscribe has an https link"
 	case mailto:
@@ -83,11 +110,17 @@ func (r *run) unsubscribe() {
 	}
 	r.add(c)
 
-	post := strings.TrimSpace(r.msg.Header.Get("List-Unsubscribe-Post"))
+	post, posts := r.lastHeader("List-Unsubscribe-Post")
 	oneClick := strings.EqualFold(post, "List-Unsubscribe=One-Click")
-	r.fp.OneClick = oneClick && https != ""
+	r.fp.OneClick = oneClick && https != "" && posts == 1
 	oc := verdict.Check{ID: "unsub.one_click", Category: verdict.Unsub, Docs: docsRFC8058, Evidence: map[string]any{"list_unsubscribe_post": post}}
+	if posts > 1 {
+		oc.Evidence["headers"] = posts
+	}
 	switch {
+	case posts > 1:
+		oc.Status, oc.Title = verdict.Fail, "More than one List-Unsubscribe-Post header"
+		oc.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to send exactly one List-Unsubscribe-Post header."}
 	case oneClick && https != "":
 		oc.Status, oc.Title = verdict.Pass, "One-click unsubscribe is set up"
 	case oneClick:
@@ -168,6 +201,16 @@ func (r *run) checkVisibleUnsub() {
 		r.add(verdict.Check{
 			ID: "unsub.visible", Category: verdict.Unsub, Status: verdict.Pass,
 			Title: "Visible unsubscribe link", Evidence: map[string]any{"link": found},
+		})
+		return
+	}
+	if r.parsed != nil && r.parsed.truncated() {
+		// The link may be among the ones that were not examined.
+		r.add(verdict.Check{
+			ID: "unsub.visible", Category: verdict.Unsub, Status: verdict.Info,
+			Title:    fmt.Sprintf("No visible unsubscribe link in the first %d links", len(r.parsed.Links)),
+			Detail:   "The message has more links than were examined, so the unsubscribe link may be among the rest.",
+			Evidence: r.noteLimit(nil),
 		})
 		return
 	}

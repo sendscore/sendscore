@@ -223,3 +223,88 @@ func (b *recordingBackend) Wait(_ context.Context, _, _ string, timeout time.Dur
 func (b *recordingBackend) Report(context.Context, string) (*verdict.Verdict, error) {
 	return nil, ErrNotFound
 }
+
+func TestWaitHugeTimeoutIsCapped(t *testing.T) {
+	b := &recordingBackend{}
+	cs := connect(t, b)
+	call(t, cs, "wait_for_message", map[string]any{"token": "abc", "timeout_seconds": 10_000_000_000}, nil)
+	if b.timeout != maxWait {
+		t.Errorf("timeout = %s, want %s", b.timeout, maxWait)
+	}
+}
+
+// quickAPI answers every wait at once with status, as a server shutting down
+// or a proxy would.
+func quickAPI(t *testing.T, status string) (*httptest.Server, *atomic.Int32) {
+	waits := &atomic.Int32{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		waits.Add(1)
+		json.NewEncoder(w).Encode(map[string]any{"status": status})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, waits
+}
+
+func TestWaitBacksOff(t *testing.T) {
+	srv, waits := quickAPI(t, "not_received")
+	b := &HTTPBackend{BaseURL: srv.URL, Token: "tok"}
+	start := time.Now()
+	_, err := b.Wait(context.Background(), "abc", "", 3500*time.Millisecond)
+	if err != ErrNotReceived {
+		t.Errorf("err = %v, want ErrNotReceived", err)
+	}
+	// Pauses of 1s and then 2s leave room for at most three requests.
+	if n := waits.Load(); n < 2 || n > 3 {
+		t.Errorf("wait requests = %d in %s, want 2 or 3", n, time.Since(start))
+	}
+}
+
+func TestWaitHonoursContext(t *testing.T) {
+	srv, _ := quickAPI(t, "not_received")
+	b := &HTTPBackend{BaseURL: srv.URL, Token: "tok"}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := b.Wait(ctx, "abc", "", 30*time.Second); err == nil {
+		t.Error("a cancelled wait returned no error")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("a cancelled wait took %s", d)
+	}
+}
+
+func TestWaitRejectsUnknownStatus(t *testing.T) {
+	srv, waits := quickAPI(t, "expired")
+	b := &HTTPBackend{BaseURL: srv.URL, Token: "tok"}
+	if _, err := b.Wait(context.Background(), "abc", "", 5*time.Second); err == nil || err == ErrNotReceived {
+		t.Errorf("err = %v, want an error naming the status", err)
+	}
+	if waits.Load() != 1 {
+		t.Errorf("wait requests = %d, want 1", waits.Load())
+	}
+}
+
+func TestToolAnnotations(t *testing.T) {
+	cs := connect(t, &recordingBackend{})
+	tools, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tl := range tools.Tools {
+		a := tl.Annotations
+		if a == nil || a.OpenWorldHint == nil || *a.OpenWorldHint {
+			t.Errorf("%s: annotations = %+v, want openWorldHint false", tl.Name, a)
+			continue
+		}
+		switch tl.Name {
+		case "get_test_address":
+			if a.ReadOnlyHint || a.IdempotentHint || a.DestructiveHint == nil || *a.DestructiveHint {
+				t.Errorf("get_test_address: annotations = %+v, want not read-only, not idempotent, and not destructive", a)
+			}
+		default:
+			if !a.ReadOnlyHint {
+				t.Errorf("%s: not read-only", tl.Name)
+			}
+		}
+	}
+}

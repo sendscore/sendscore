@@ -48,8 +48,15 @@ Link domains are only looked up on blocklists when you ask: --spamhaus-key
 (Spamhaus DQS, allowed for commercial use), --surbl-zone, or
 --public-blocklists (the free zones, for non-commercial use only).
 
+The previous issue given with --previous is read without DNS lookups, so
+only what the messages themselves carry is compared (signing domains and
+selectors, the Return-Path, unsubscribe headers, links, images, and size).
+Authentication results are not compared, because re-checking last week's
+message against today's DNS would not show what it got last week.
+
 Exit codes: 0 every check passed, 1 warnings only, 2 a check failed,
-64 usage error.`,
+64 usage error, 65 the input is not an email message, 66 the input cannot
+be read, 70 internal error, and 74 the report cannot be written.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runCheck(cmd.Context(), cmd.OutOrStdout(), args[0], f)
@@ -64,8 +71,10 @@ Exit codes: 0 every check passed, 1 warnings only, 2 a check failed,
 	fl.StringVar(&f.helo, "helo", "", "HELO name the delivering server gave")
 	fl.StringVar(&f.tls, "tls", "", `whether delivery used TLS: "yes" or "no"`)
 	fl.StringVar(&f.previous, "previous", "", "the publication's previous issue (.eml), to list what changed")
-	fl.StringVar(&f.spamhausKey, "spamhaus-key", os.Getenv("SENDSCORE_SPAMHAUS_DQS_KEY"), "Spamhaus DQS key, to look link domains up on Spamhaus DBL (or SENDSCORE_SPAMHAUS_DQS_KEY)")
-	fl.StringVar(&f.surblZone, "surbl-zone", os.Getenv("SENDSCORE_SURBL_ZONE"), "SURBL data feed zone, for subscribers (or SENDSCORE_SURBL_ZONE)")
+	// The defaults stay empty so --help never prints a key; options()
+	// reads the environment after parsing.
+	fl.StringVar(&f.spamhausKey, "spamhaus-key", "", "Spamhaus DQS key, to look link domains up on Spamhaus DBL (or SENDSCORE_SPAMHAUS_DQS_KEY)")
+	fl.StringVar(&f.surblZone, "surbl-zone", "", "SURBL data feed zone, for subscribers (or SENDSCORE_SURBL_ZONE)")
 	fl.BoolVar(&f.publicBlocklists, "public-blocklists", false, "look link domains up on the free public Spamhaus DBL and SURBL zones (non-commercial use only)")
 	return c
 }
@@ -77,17 +86,17 @@ func readMessage(path string) ([]byte, error) {
 	} else {
 		file, err := os.Open(path)
 		if err != nil {
-			return nil, err
+			return nil, withCode(ExitNoInput, err)
 		}
 		defer file.Close()
 		r = file
 	}
 	b, err := io.ReadAll(io.LimitReader(r, maxMessageBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, withCode(ExitNoInput, fmt.Errorf("%s: %w", path, err))
 	}
 	if len(b) > maxMessageBytes {
-		return nil, fmt.Errorf("%s is larger than %d MB", path, maxMessageBytes>>20)
+		return nil, withCode(ExitDataErr, fmt.Errorf("%s is larger than %d MB", path, maxMessageBytes>>20))
 	}
 	return b, nil
 }
@@ -98,7 +107,7 @@ func (f *checkFlags) options() (engine.Options, error) {
 		o.Resolver = engine.OfflineResolver{}
 	}
 	o.CheckLinks = f.links
-	o.Blocklists = blocklists(f.spamhausKey, f.surblZone, f.publicBlocklists)
+	o.Blocklists = blocklists(orEnv(f.spamhausKey, "SENDSCORE_SPAMHAUS_DQS_KEY"), orEnv(f.surblZone, "SENDSCORE_SURBL_ZONE"), f.publicBlocklists)
 	if f.ip != "" {
 		ip := net.ParseIP(f.ip)
 		if ip == nil {
@@ -135,32 +144,36 @@ func runCheck(ctx context.Context, out io.Writer, path string, f *checkFlags) er
 		return err
 	}
 	if f.previous != "" {
-		prevRaw, err := readMessage(f.previous)
+		prev, err := messageFingerprint(ctx, f.previous)
 		if err != nil {
 			return err
 		}
-		prev, err := engine.Analyze(ctx, prevRaw, engine.Options{Resolver: opts.Resolver})
-		if err != nil {
-			return fmt.Errorf("%s: %w", f.previous, err)
-		}
-		opts.Previous = prev.Fingerprint
+		opts.Previous = prev
 	}
 	opts.ReceivedAt = receivedAt(raw)
 
 	v, err := engine.Analyze(ctx, raw, opts)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return withCode(ExitDataErr, fmt.Errorf("%s: %w", path, err))
 	}
 	if f.json {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(v); err != nil {
-			return err
+			return withCode(ExitIOErr, err)
 		}
-	} else {
-		printVerdict(out, v)
+	} else if err := printVerdict(out, v); err != nil {
+		return withCode(ExitIOErr, err)
 	}
 	return exitFor(v)
+}
+
+// orEnv returns flag, or the environment variable when the flag is unset.
+func orEnv(flag, env string) string {
+	if flag != "" {
+		return flag
+	}
+	return os.Getenv(env)
 }
 
 // receivedAt uses the message's Date for a saved file, so a report on the

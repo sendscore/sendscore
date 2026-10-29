@@ -212,8 +212,11 @@ func TestEverythingRight(t *testing.T) {
 func TestProviderSignatureDoesNotAlign(t *testing.T) {
 	dns := goodDNS()
 	dns.txt["k1._domainkey.mailer.net"] = dns.txt["k1._domainkey.example.com"]
-	// Signed by the platform, not the publisher; no envelope, so SPF cannot help.
-	v := analyze(t, buildMessage(t, msgOpts{sign: true, domain: "mailer.net"}), Options{Resolver: dns})
+	dns.txt["bounces.mailer.net"] = []string{"v=spf1 ip4:203.0.113.0/24 -all"}
+	// Signed by the platform, not the publisher, with the platform's
+	// Return-Path, so SPF cannot help.
+	raw := withReturnPath(buildMessage(t, msgOpts{sign: true, domain: "mailer.net"}), "bounce@bounces.mailer.net")
+	v := analyze(t, raw, Options{Resolver: dns})
 	wantStatus(t, v, "auth.dkim", verdict.Pass)
 	wantStatus(t, v, "auth.dmarc", verdict.Fail)
 	wantStatus(t, v, "auth.spf", verdict.Skipped)
@@ -358,7 +361,7 @@ func TestCompareFlagsRegressions(t *testing.T) {
 	dns := goodDNS()
 	dns.txt["k1._domainkey.mailer.net"] = dns.txt["k1._domainkey.example.com"]
 	prev := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: dns})
-	cur := analyze(t, buildMessage(t, msgOpts{sign: true, domain: "mailer.net", headers: "X-Nothing: 1\r\n", signKeys: []string{"From"}}),
+	cur := analyze(t, withReturnPath(buildMessage(t, msgOpts{sign: true, domain: "mailer.net", headers: "X-Nothing: 1\r\n", signKeys: []string{"From"}}), "bounce@bounces.mailer.net"),
 		Options{Resolver: dns, Previous: prev.Fingerprint})
 
 	fields := map[string]verdict.Change{}

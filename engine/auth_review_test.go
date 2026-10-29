@@ -192,7 +192,7 @@ func TestNoDMARCRecordIsNotADMARCPass(t *testing.T) {
 }
 
 func TestBrokenSignatureDMARCDetail(t *testing.T) {
-	raw := buildMessage(t, msgOpts{sign: true})
+	raw := withReturnPath(buildMessage(t, msgOpts{sign: true}), "bounce@bounces.mailer.net")
 	raw = bytes.Replace(raw, []byte("shooting into the sun."), []byte("shooting into the moon"), 1)
 	v := analyze(t, raw, Options{})
 	c := find(t, v, "auth.dmarc")
