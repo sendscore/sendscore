@@ -75,6 +75,7 @@ func goodDNS() *fakeDNS {
 
 const goodHTML = `<html><head><style>p{color:#333}</style></head><body>
 <p>Hello. Today: shooting into the sun.</p>
+<p>Shooting straight into the sun flattens contrast and blows out the sky, but a small change in angle fixes most of it. Put the sun just outside the frame, or behind something with a hard edge, and let the flare work for you instead of against you. Meter for the highlights, then lift the shadows later.</p>
 <p><img src="https://cdn.example.com/sun.jpg" alt="A sunset" width="600" height="400"></p>
 <p><a href="https://example.com/posts/sun">Read the full tip</a></p>
 <p><a href="https://example.com/unsubscribe?u=1">Unsubscribe</a></p>
@@ -82,6 +83,7 @@ const goodHTML = `<html><head><style>p{color:#333}</style></head><body>
 </body></html>`
 
 type msgOpts struct {
+	subject  string
 	from     string
 	headers  string
 	html     string
@@ -110,7 +112,10 @@ func buildMessage(t *testing.T, o msgOpts) []byte {
 	b.WriteString("Return-Path: <bounce@bounce.example.com>\r\n")
 	b.WriteString("From: " + o.from + "\r\n")
 	b.WriteString("To: test@in.sendscore.ai\r\n")
-	b.WriteString("Subject: Shooting into the sun\r\n")
+	if o.subject == "" {
+		o.subject = "Shooting into the sun"
+	}
+	b.WriteString("Subject: " + o.subject + "\r\n")
 	b.WriteString("Date: Tue, 28 Oct 2026 13:12:04 +0000\r\n")
 	b.WriteString("Message-ID: <abc123@example.com>\r\n")
 	b.WriteString(o.headers)
@@ -182,6 +187,8 @@ func TestEverythingRight(t *testing.T) {
 		"unsub.header", "unsub.one_click", "unsub.signed", "unsub.visible",
 		"struct.mime", "struct.plain_text", "struct.html_size", "struct.headers", "struct.from_domain",
 		"content.placeholders", "content.insecure_links", "content.image_alt",
+		"content.subject", "content.preheader", "content.text_ratio", "content.shorteners",
+		"content.link_text", "content.active", "content.blocklists",
 	} {
 		wantStatus(t, v, id, verdict.Pass)
 	}
@@ -407,4 +414,98 @@ func TestNoSPFRecordFails(t *testing.T) {
 	delete(dns.txt, "bounce.example.com")
 	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: dns})
 	wantStatus(t, v, "auth.spf_lookups", verdict.Fail)
+}
+
+func TestSubjectSignals(t *testing.T) {
+	long := strings.Repeat("Shooting into the sun, ", 4)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, subject: long}), Options{})
+	wantStatus(t, v, "content.subject", verdict.Warn)
+	v = analyze(t, buildMessage(t, msgOpts{sign: true, subject: "HUGE SALE ON LENSES TODAY!!"}), Options{})
+	c := find(t, v, "content.subject")
+	if c.Status != verdict.Warn || len(c.Evidence["issues"].([]string)) != 2 {
+		t.Errorf("subject = %s %v", c.Status, c.Evidence)
+	}
+}
+
+func TestPreheaderBoilerplate(t *testing.T) {
+	html := strings.Replace(goodHTML, "<p>Hello.", "<p><a href=\"https://example.com/web\">View in browser</a></p><p>Hello.", 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.preheader", verdict.Warn)
+}
+
+func TestImageOnly(t *testing.T) {
+	html := `<html><body><img src="https://cdn.example.com/a.jpg" alt="Sale"><img src="https://cdn.example.com/b.jpg" alt="More"><p><a href="https://example.com/unsubscribe?u=1">Unsubscribe</a></p></body></html>`
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.text_ratio", verdict.Warn)
+}
+
+func TestShortenersAndActiveContent(t *testing.T) {
+	html := strings.Replace(goodHTML, "https://example.com/posts/sun", "https://bit.ly/3abc", 1)
+	html = strings.Replace(html, "</body>", `<form action="https://example.com/poll"><input name="q"></form><script>x()</script></body>`, 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.shorteners", verdict.Warn)
+	c := find(t, v, "content.active")
+	if c.Status != verdict.Warn || len(c.Evidence["found"].([]string)) != 2 {
+		t.Errorf("active = %s %v", c.Status, c.Evidence)
+	}
+}
+
+func TestLinkTextMismatch(t *testing.T) {
+	html := strings.Replace(goodHTML, "</body>", `<p><a href="https://evil.test/login">paypal.com</a></p></body>`, 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{})
+	wantStatus(t, v, "content.link_text", verdict.Warn)
+
+	// Click tracking: every link goes through one domain, so text naming
+	// the real destination is normal.
+	tracked := `<html><body><p>Hello there, a longer issue body follows here.</p>
+<p><a href="https://click.mailer.test/a">example.com/posts/sun</a></p>
+<p><a href="https://click.mailer.test/b">Read more</a></p>
+<p><a href="https://click.mailer.test/c">Unsubscribe</a></p></body></html>`
+	v = analyze(t, buildMessage(t, msgOpts{sign: true, html: tracked}), Options{})
+	wantStatus(t, v, "content.link_text", verdict.Pass)
+}
+
+func TestBlocklists(t *testing.T) {
+	dns := goodDNS()
+	dns.ip["badlinks.test.dbl.spamhaus.org"] = []net.IPAddr{{IP: net.ParseIP("127.0.1.2")}}
+	html := strings.Replace(goodHTML, "https://example.com/posts/sun", "https://www.badlinks.test/offer", 1)
+	v := analyze(t, buildMessage(t, msgOpts{sign: true, html: html}), Options{Resolver: dns})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Fail || !strings.Contains(c.Title, "badlinks.test") {
+		t.Errorf("blocklists = %s %s", c.Status, c.Title)
+	}
+	// Content failures do not block sending by default.
+	if !v.ReadyToSend {
+		t.Error("a blocklisted link blocked ready_to_send")
+	}
+}
+
+type refusingDNS struct{ *fakeDNS }
+
+func (r refusingDNS) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if strings.HasSuffix(host, ".dbl.spamhaus.org") {
+		return []net.IPAddr{{IP: net.ParseIP("127.255.255.254")}}, nil
+	}
+	if strings.HasSuffix(host, ".multi.surbl.org") {
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	return r.fakeDNS.LookupIPAddr(ctx, host)
+}
+
+func TestBlocklistRefusalIsSkipped(t *testing.T) {
+	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: refusingDNS{goodDNS()}})
+	c := find(t, v, "content.blocklists")
+	if c.Status != verdict.Skipped || !strings.Contains(c.Reason, "refused") {
+		t.Errorf("blocklists = %s %q", c.Status, c.Reason)
+	}
+}
+
+func TestAttachmentsAreRecorded(t *testing.T) {
+	raw := buildMessage(t, msgOpts{})
+	raw = bytes.Replace(raw, []byte("--b1--"), []byte("--b1\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"issue.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n--b1--"), 1)
+	v := analyze(t, raw, Options{Resolver: OfflineResolver{}})
+	c := find(t, v, "content.active")
+	if c.Status != verdict.Warn || !strings.Contains(c.Title, "issue.pdf") {
+		t.Errorf("active = %s %s", c.Status, c.Title)
+	}
 }

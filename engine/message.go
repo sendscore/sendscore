@@ -40,6 +40,8 @@ type message struct {
 	// MIMEErr is set when the body could not be walked cleanly. The headers
 	// are still usable.
 	MIMEErr error
+	// Attachments names the parts sent as attachments.
+	Attachments []string
 }
 
 var wordDecoder = &mime.WordDecoder{CharsetReader: charset.NewReaderLabel}
@@ -120,10 +122,15 @@ func (m *message) walk(h textproto.MIMEHeader, body io.Reader, depth int, parts 
 		}
 	}
 
-	if mediaType != "text/html" && mediaType != "text/plain" {
+	if disp := h.Get("Content-Disposition"); strings.HasPrefix(strings.ToLower(disp), "attachment") {
+		name := mediaType
+		if _, dp, err := mime.ParseMediaType(disp); err == nil && dp["filename"] != "" {
+			name = dp["filename"]
+		}
+		m.Attachments = append(m.Attachments, name)
 		return nil
 	}
-	if strings.HasPrefix(strings.ToLower(h.Get("Content-Disposition")), "attachment") {
+	if mediaType != "text/html" && mediaType != "text/plain" {
 		return nil
 	}
 	decoded, err := decodeBody(body, h.Get("Content-Transfer-Encoding"), params["charset"])

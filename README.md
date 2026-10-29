@@ -61,10 +61,14 @@ An agent's loop: get a test address, send the issue's preview to it from the ema
 | Authentication | `auth.spf`, `auth.spf_lookups`, `auth.dkim`, `auth.dkim_key`, `auth.dmarc_record`, `auth.dmarc`, `auth.alignment`, `auth.ptr`, `auth.tls` |
 | Unsubscribe | `unsub.header`, `unsub.one_click`, `unsub.signed`, `unsub.visible` |
 | Structure | `struct.mime`, `struct.plain_text`, `struct.html_size`, `struct.headers`, `struct.from_domain` |
-| Content | `content.placeholders`, `content.links`, `content.images`, `content.insecure_links`, `content.image_alt` |
+| Content | `content.placeholders`, `content.links`, `content.images`, `content.insecure_links`, `content.image_alt`, `content.subject`, `content.preheader`, `content.text_ratio`, `content.shorteners`, `content.link_text`, `content.active`, `content.blocklists` |
 | Changes | `changes.regressions` (with `--previous`) |
 
 Statuses are `pass`, `warn`, `fail`, `info`, and `skipped` (with a reason). The verdict is `fail` if anything fails, `warn` if anything warns, and `pass` otherwise. `ready_to_send` is false when an authentication or unsubscribe check fails; content problems are reported without blocking.
+
+There is no list of "spam words". Mailbox providers filter on reputation, authentication, and engagement, so a word list would flag ordinary copy while claiming to know a filter's decision. The content checks look for things with a factual basis instead, such as links to domains on Spamhaus DBL or SURBL, URL shorteners, link text that names a different domain from the link, image-only issues, missing preview text, and scripts, forms, or attachments.
+
+Spamhaus refuses queries that come through large public DNS resolvers. When it does, `content.blocklists` is skipped with that reason rather than passed.
 
 ## Use it from Go
 

@@ -26,6 +26,9 @@ type image struct {
 type parsedHTML struct {
 	Links  []link
 	Images []image
+	// Active lists elements a newsletter should not carry: scripts, forms,
+	// and embedded frames or objects.
+	Active []string
 }
 
 func parseHTML(s string) *parsedHTML {
@@ -46,6 +49,8 @@ func parseHTML(s string) *parsedHTML {
 					open = &link{Href: strings.TrimSpace(*href)}
 					text.Reset()
 				}
+			case "script", "form", "iframe", "object", "embed":
+				p.Active = appendUnique(p.Active, t.Data)
 			case "img":
 				src := attr(t, "src")
 				if src == nil {
@@ -126,6 +131,13 @@ func (r *run) content() {
 	r.checkPlaceholders()
 	r.checkInsecureLinks()
 	r.checkImageAlt()
+	r.checkSubject()
+	r.checkPreheader()
+	r.checkImageOnly()
+	r.checkShorteners()
+	r.checkLinkTextMismatch()
+	r.checkActiveContent()
+	r.checkBlocklists()
 	r.checkLinks()
 }
 
