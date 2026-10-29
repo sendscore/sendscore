@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"golang.org/x/net/idna"
 	"golang.org/x/net/publicsuffix"
 
 	"github.com/sendscore/sendscore/verdict"
@@ -24,7 +26,7 @@ import (
 
 const (
 	subjectCutoff          = 70 // characters a phone inbox typically shows
-	imageOnlyOneChars      = 60
+	imageOnlyOneChars      = 50
 	imageOnlyManyChars     = 200
 	maxBlocklistDomains    = 100
 	blocklistConcurrency   = 8
@@ -110,11 +112,10 @@ func joinList(items []string, conj string) string {
 // checkPreheader looks at what an inbox shows next to the subject: the
 // first text in the message, including hidden preheader text.
 func (r *run) checkPreheader() {
-	text := r.msg.Text
+	preview := collapse(r.msg.Text)
 	if r.msg.HTML != "" {
-		text = visibleText(r.msg.HTML)
+		preview = r.parsed.Text
 	}
-	preview := strings.Join(strings.Fields(text), " ")
 	if len([]rune(preview)) > 100 {
 		preview = string([]rune(preview)[:100])
 	}
@@ -145,14 +146,16 @@ func (r *run) checkImageOnly() {
 		r.add(verdict.Check{ID: "content.text_ratio", Category: verdict.Content, Status: verdict.Info, Title: "Plain text message"})
 		return
 	}
-	chars := len([]rune(strings.Join(strings.Fields(visibleText(r.msg.HTML)), " ")))
+	// Footer blocks (unsubscribe, address, and consent lines) are left out:
+	// every bulk platform adds one, so they say nothing about the issue.
+	chars := len([]rune(r.parsed.Body))
 	content := 0
 	for _, im := range r.parsed.Images {
 		if !im.Pixel && !im.Hidden {
 			content++
 		}
 	}
-	ev := map[string]any{"text_characters": chars, "images": content}
+	ev := r.noteLimit(map[string]any{"text_characters": chars, "images": content})
 	// Image-only means almost no words around the pictures: a single image
 	// with next to no text, or several images with only a line or two. A
 	// photo with a paragraph under it is an ordinary newsletter.
@@ -160,34 +163,52 @@ func (r *run) checkImageOnly() {
 	if imageOnly {
 		r.add(verdict.Check{
 			ID: "content.text_ratio", Category: verdict.Content, Status: verdict.Warn,
-			Title:    fmt.Sprintf("Mostly images, with %s and only %d characters of text", plural(content, "image"), chars),
+			Title:    fmt.Sprintf("Mostly images, with %s and only %d characters of text outside the footer", plural(content, "image"), chars),
 			Detail:   "Many readers have images off, so they see an almost empty email, and filters look harder at image-only mail.",
 			Evidence: ev,
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Put the message in text, and use images to support it."},
 		})
 		return
 	}
-	r.add(verdict.Check{ID: "content.text_ratio", Category: verdict.Content, Status: verdict.Pass, Title: "The message carries real text", Evidence: ev})
+	r.add(r.partial(verdict.Check{ID: "content.text_ratio", Category: verdict.Content, Status: verdict.Pass, Title: "The message carries real text", Evidence: ev}))
 }
 
 func (r *run) checkShorteners() {
-	var found []string
+	var found set
 	for _, l := range r.parsed.Links {
 		if h := linkHost(l.Href); shorteners[h] {
-			found = appendUnique(found, l.Href)
+			found.add(l.Href)
 		}
 	}
-	if len(found) == 0 {
-		r.add(verdict.Check{ID: "content.shorteners", Category: verdict.Content, Status: verdict.Pass, Title: "No link shorteners"})
+	if len(found.items) == 0 {
+		r.add(r.partial(verdict.Check{ID: "content.shorteners", Category: verdict.Content, Status: verdict.Pass, Title: "No link shorteners"}))
 		return
 	}
+	ev := map[string]any{}
+	capped(ev, "links", found.items)
 	r.add(verdict.Check{
 		ID: "content.shorteners", Category: verdict.Content, Status: verdict.Warn,
-		Title:    fmt.Sprintf("%s through a URL shortener", plural(len(found), "link")),
+		Title:    fmt.Sprintf("%s through a URL shortener", plural(len(found.items), "link")),
 		Detail:   "Shorteners hide where a link goes, and filters treat them with suspicion because spammers use them.",
-		Evidence: map[string]any{"links": found},
+		Evidence: r.noteLimit(ev),
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Link to the real address instead."},
 	})
+}
+
+// set is a list of distinct strings in the order first seen.
+type set struct {
+	seen  map[string]bool
+	items []string
+}
+
+func (s *set) add(v string) {
+	if s.seen == nil {
+		s.seen = map[string]bool{}
+	}
+	if !s.seen[v] {
+		s.seen[v] = true
+		s.items = append(s.items, v)
+	}
 }
 
 // Click tracking hosts of common email platforms. Their links name the real
@@ -208,11 +229,41 @@ func isTracker(host string) bool {
 	return false
 }
 
+// Paths and first host labels that mark a click tracking redirect on the
+// sender's own domain, such as email.mg.example.com/c/abc or
+// url1234.example.com/ls/click.
+var (
+	trackingPath  = regexp.MustCompile(`(?i)^/(c|e|l|r|t|ls/click|wf/click|track/click|click|cl0|redirect|link|links)(/|$)`)
+	trackingLabel = regexp.MustCompile(`(?i)^(click|clicks|email|emails|e|em|link|links|track|tracking|trk|t|go|r|mail|news|newsletter|url\d*)$`)
+)
+
+// ownTracker reports whether a link goes through a click tracking redirect
+// on a subdomain of the sender's own domain. Both the subdomain and a
+// tracking label or path are required, so a link to the sender's main
+// site is still compared with its text.
+func (r *run) ownTracker(href string) bool {
+	if r.fromDom == "" {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(href))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	org := orgDomain(r.fromDom)
+	if host == org || !strings.HasSuffix(host, "."+org) {
+		return false
+	}
+	first, _, _ := strings.Cut(host, ".")
+	return trackingLabel.MatchString(first) || trackingPath.MatchString(u.EscapedPath())
+}
+
 // checkLinkTextMismatch flags a link whose own text is a web address on one
 // domain while the link goes to another. Links through a known click
 // tracking host are allowed, and so are links through the issue's own
 // tracking domain, recognised as the one domain carrying at least three
-// links and more than half of them. Both rules are deterministic.
+// links and more than half of them, or as a tracking subdomain of the
+// sender's own domain. Every rule is deterministic.
 func (r *run) checkLinkTextMismatch() {
 	counts := map[string]int{}
 	for _, l := range r.parsed.Links {
@@ -233,20 +284,22 @@ func (r *run) checkLinkTextMismatch() {
 		if shown == "" || target == "" {
 			continue
 		}
-		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker || isTracker(target) {
+		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker || isTracker(target) || r.ownTracker(l.Href) {
 			continue
 		}
 		bad = append(bad, map[string]string{"text": l.Words, "href": l.Href})
 	}
 	if len(bad) == 0 {
-		r.add(verdict.Check{ID: "content.link_text", Category: verdict.Content, Status: verdict.Pass, Title: "Links go where their text says"})
+		r.add(r.partial(verdict.Check{ID: "content.link_text", Category: verdict.Content, Status: verdict.Pass, Title: "Links go where their text says"}))
 		return
 	}
+	ev := map[string]any{}
+	capped(ev, "links", bad)
 	r.add(verdict.Check{
 		ID: "content.link_text", Category: verdict.Content, Status: verdict.Warn,
 		Title:    fmt.Sprintf("%s that show one address and go to another", plural(len(bad), "link")),
 		Detail:   "Link text that names one domain while the link goes to another is a phishing signal to filters and readers.",
-		Evidence: map[string]any{"links": bad},
+		Evidence: r.noteLimit(ev),
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Make the link text match the destination, or use words instead of an address."},
 	})
 }
@@ -256,15 +309,20 @@ func (r *run) checkActiveContent() {
 	for _, a := range r.msg.Attachments {
 		found = append(found, "attachment "+a)
 	}
+	ev := map[string]any{}
+	capped(ev, "found", found)
+	if len(found) > maxEvidenceItems {
+		found = append(found[:maxEvidenceItems:maxEvidenceItems], fmt.Sprintf("%d more", len(found)-maxEvidenceItems))
+	}
 	if len(found) == 0 {
 		r.add(verdict.Check{ID: "content.active", Category: verdict.Content, Status: verdict.Pass, Title: "No scripts, forms, embeds, or attachments"})
 		return
 	}
 	r.add(verdict.Check{
 		ID: "content.active", Category: verdict.Content, Status: verdict.Warn,
-		Title:    "Contains " + strings.Join(found, ", "),
+		Title:    "Contains " + joinAnd(found),
 		Detail:   "Mail clients strip scripts, forms, and embeds, and filters are wary of them and of attachments in bulk mail.",
-		Evidence: map[string]any{"found": found},
+		Evidence: ev,
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Link to a web page for anything interactive, and link to files instead of attaching them."},
 	})
 }
@@ -281,26 +339,51 @@ func (r *run) checkBlocklists() {
 			"Blocklist lookups are off. Set a Spamhaus DQS key, or turn on the free public lists for non-commercial use."))
 		return
 	}
-	var domains []string
-	for _, l := range r.parsed.Links {
-		if h := linkHost(l.Href); h != "" && net.ParseIP(h) == nil {
-			domains = appendUnique(domains, orgDomain(h))
+	// Hosts are looked up as ASCII DNS names. One that cannot be written as
+	// one (a bad IDN, or a label over 63 bytes) is reported as not checked:
+	// a resolver refuses such a name locally, which would read as not listed.
+	var all, invalid set
+	addHost := func(u string) {
+		h := linkHost(u)
+		if h == "" || net.ParseIP(h) != nil {
+			return
 		}
+		ascii, ok := dnsName(h)
+		if !ok {
+			invalid.add(h)
+			return
+		}
+		all.add(orgDomain(ascii))
+	}
+	for _, l := range r.parsed.Links {
+		addHost(l.Href)
 	}
 	for _, im := range r.parsed.Images {
-		if h := linkHost(im.Src); h != "" && net.ParseIP(h) == nil {
-			domains = appendUnique(domains, orgDomain(h))
-		}
+		addHost(im.Src)
 	}
+	domains := all.items
 	sort.Strings(domains)
-	if len(domains) == 0 {
-		r.add(verdict.Check{ID: "content.blocklists", Category: verdict.Content, Status: verdict.Info, Title: "No link domains to look up"})
+	sort.Strings(invalid.items)
+	if len(domains) == 0 && len(invalid.items) == 0 {
+		r.add(r.partial(verdict.Check{ID: "content.blocklists", Category: verdict.Content, Status: verdict.Info, Title: "No link domains to look up"}))
 		return
 	}
 	var unchecked []string
 	if len(domains) > maxBlocklistDomains {
 		unchecked = domains[maxBlocklistDomains:]
 		domains = domains[:maxBlocklistDomains]
+	}
+	// The query name must also fit, with the list's zone, in 253 bytes.
+	for _, bl := range lists {
+		kept := domains[:0:0]
+		for _, d := range domains {
+			if len(d)+1+len(bl.Zone) > 253 {
+				invalid.add(d)
+				continue
+			}
+			kept = append(kept, d)
+		}
+		domains = kept
 	}
 
 	ctx, cancel := context.WithTimeout(r.ctx, blocklistDeadline)
@@ -338,7 +421,7 @@ func (r *run) checkBlocklists() {
 	}
 
 	var listed []map[string]string
-	var problems []string
+	var problems, hit set
 	for i, j := range jobs {
 		res := results[i]
 		switch {
@@ -346,33 +429,39 @@ func (r *run) checkBlocklists() {
 			r.add(skipped("content.blocklists", verdict.Content, "Link domains not looked up", "Offline: DNS lookups are disabled."))
 			return
 		case j.test && res.state != blListed:
-			problems = appendUnique(problems, j.list.Name+" did not answer its test lookup ("+res.describe()+")")
+			problems.add(j.list.Name + " did not answer its test lookup (" + res.describe() + ")")
 		case !j.test && res.state == blListed:
 			listed = append(listed, map[string]string{"domain": j.domain, "list": j.list.Name, "answer": res.answer})
+			hit.add(j.domain)
 		case !j.test && res.state != blClear:
-			problems = appendUnique(problems, j.list.Name+" could not check "+j.domain+" ("+res.describe()+")")
+			problems.add(j.list.Name + " could not check " + j.domain + " (" + res.describe() + ")")
 		}
 	}
 	names := make([]string, 0, len(lists))
 	for _, bl := range lists {
 		names = append(names, bl.Name)
 	}
-	ev := map[string]any{"domains": domains, "lists": names}
+	ev := map[string]any{"lists": names}
+	capped(ev, "domains", domains)
 	if len(unchecked) > 0 {
-		ev["not_checked"] = unchecked
+		capped(ev, "not_checked", unchecked)
 	}
-	if len(problems) > 0 {
-		ev["problems"] = problems
+	if len(invalid.items) > 0 {
+		capped(ev, "not_valid", invalid.items)
 	}
+	if len(problems.items) > 0 {
+		capped(ev, "problems", problems.items)
+	}
+	ev = r.noteLimit(ev)
 	if len(listed) > 0 {
-		ev["listed"] = listed
-		var hit []string
-		for _, l := range listed {
-			hit = appendUnique(hit, l["domain"])
+		capped(ev, "listed", listed)
+		shown := hit.items
+		if len(shown) > maxEvidenceItems {
+			shown = append(shown[:maxEvidenceItems:maxEvidenceItems], fmt.Sprintf("%d more", len(hit.items)-maxEvidenceItems))
 		}
 		r.add(verdict.Check{
 			ID: "content.blocklists", Category: verdict.Content, Status: verdict.Fail,
-			Title:    "Links to a blocklisted domain (" + strings.Join(hit, ", ") + ")",
+			Title:    "Links to a blocklisted domain (" + strings.Join(shown, ", ") + ")",
 			Detail:   "Filters reject or junk mail that links to domains on these lists, whatever else the message gets right.",
 			Evidence: ev,
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Remove links to the listed domains, or ask the list to delist a domain you own."},
@@ -380,24 +469,47 @@ func (r *run) checkBlocklists() {
 		})
 		return
 	}
-	if len(problems) > 0 || len(unchecked) > 0 {
-		reason := strings.Join(problems, "; ")
-		if len(unchecked) > 0 {
-			if reason != "" {
-				reason += "; "
-			}
-			reason += fmt.Sprintf("%d more domains were not looked up (the limit is %d)", len(unchecked), maxBlocklistDomains)
+	if len(problems.items) > 0 || len(unchecked) > 0 || len(invalid.items) > 0 {
+		var reasons []string
+		if len(problems.items) > 3 {
+			reasons = append(reasons, strings.Join(problems.items[:3], "; ")+fmt.Sprintf("; and %d more lookups failed", len(problems.items)-3))
+		} else if len(problems.items) > 0 {
+			reasons = append(reasons, strings.Join(problems.items, "; "))
 		}
+		if len(unchecked) > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d more domains were not looked up (the limit is %d)", len(unchecked), maxBlocklistDomains))
+		}
+		if len(invalid.items) > 0 {
+			reasons = append(reasons, fmt.Sprintf("%s could not be looked up because %s not valid DNS names",
+				plural(len(invalid.items), "link domain"), map[bool]string{true: "it is", false: "they are"}[len(invalid.items) == 1]))
+		}
+		reason := strings.Join(reasons, "; ")
 		c := skipped("content.blocklists", verdict.Content, "Not every link domain could be looked up", strings.ToUpper(reason[:1])+reason[1:]+".")
 		c.Evidence = ev
 		r.add(c)
 		return
 	}
-	r.add(verdict.Check{
+	r.add(r.partial(verdict.Check{
 		ID: "content.blocklists", Category: verdict.Content, Status: verdict.Pass,
 		Title:    fmt.Sprintf("No link domain is on %s (%s checked)", joinList(names, "or"), plural(len(domains), "domain")),
 		Evidence: ev,
-	})
+	}))
+}
+
+// dnsName converts a host to the ASCII form DNS uses, and reports false
+// when it cannot be one: a failed IDN conversion, an empty label, a label
+// over 63 bytes, or a name over 253 bytes.
+func dnsName(host string) (string, bool) {
+	a, err := idna.Lookup.ToASCII(strings.TrimSuffix(host, "."))
+	if err != nil || a == "" || len(a) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(a, ".") {
+		if label == "" || len(label) > 63 {
+			return "", false
+		}
+	}
+	return strings.ToLower(a), true
 }
 
 type blState int

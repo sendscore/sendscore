@@ -17,7 +17,7 @@ import (
 
 // apiMaxWait is the longest a single wait request may block on the server;
 // longer waits are made of several requests.
-const apiMaxWait = 60 * time.Second
+const apiMaxWait = 50 * time.Second
 
 // HTTPBackend reaches a SendScore app over its JSON API. It is what
 // `sendscore mcp` uses, so a laptop needs no database and no mail server.
@@ -76,7 +76,7 @@ func (h *HTTPBackend) CreateTestAddress(ctx context.Context) (TestAddress, error
 
 // Wait implements Backend, splitting long waits into requests the server
 // accepts.
-func (h *HTTPBackend) Wait(ctx context.Context, token string, timeout time.Duration) (*verdict.Verdict, error) {
+func (h *HTTPBackend) Wait(ctx context.Context, token, after string, timeout time.Duration) (*verdict.Verdict, error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		left := time.Until(deadline)
@@ -92,6 +92,9 @@ func (h *HTTPBackend) Wait(ctx context.Context, token string, timeout time.Durat
 			Verdict *verdict.Verdict `json:"verdict"`
 		}
 		path := "/api/v1/test-addresses/" + url.PathEscape(token) + "/wait?timeout=" + strconv.Itoa(secs)
+		if after != "" {
+			path += "&after=" + url.QueryEscape(after)
+		}
 		if err := h.do(ctx, http.MethodGet, path, &out); err != nil {
 			return nil, err
 		}

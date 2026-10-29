@@ -54,6 +54,8 @@ The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare
 
 An agent's loop: get a test address, send the issue's preview to it from the email platform, wait for the verdict, and fix what `top_fixes` lists before scheduling.
 
+One `wait_for_message` call waits up to 50 seconds; if nothing has arrived it answers `not_received`, and the agent calls it again. After fixing something and sending a new preview to the same address, pass the previous report's ID as `after_report_id` so the wait returns only the new report.
+
 ## What it checks
 
 | Category | Checks |
@@ -64,7 +66,7 @@ An agent's loop: get a test address, send the issue's preview to it from the ema
 | Content | `content.placeholders`, `content.links`, `content.images`, `content.insecure_links`, `content.image_alt`, `content.subject`, `content.preheader`, `content.text_ratio`, `content.shorteners`, `content.link_text`, `content.active`, `content.blocklists` |
 | Changes | `changes.regressions` (with `--previous`) |
 
-Statuses are `pass`, `warn`, `fail`, `info`, and `skipped` (with a reason). The verdict is `fail` if anything fails, `warn` if anything warns, and `pass` otherwise. `ready_to_send` is false when an authentication or unsubscribe check fails; content problems are reported without blocking.
+Statuses are `pass`, `warn`, `fail`, `info`, and `skipped` (with a reason). The verdict is `fail` if anything fails, `warn` if anything warns, and `pass` otherwise. `ready_to_send` is false when an authentication or unsubscribe check fails, and when DMARC could not be evaluated (for example because DNS lookups failed or `--offline` was used). In that case the verdict is at least `warn`, the summary says authentication could not be checked, and the first fix is to run the check again. Content problems are reported without blocking.
 
 There is no list of "spam words". Mailbox providers filter on reputation, authentication, and engagement, so a word list would flag ordinary copy while claiming to know a filter's decision. The content checks look for things with a factual basis instead, such as links to domains on Spamhaus DBL or SURBL, URL shorteners, link text that names a different domain from the link, image-only issues, missing preview text, and scripts, forms, or attachments.
 

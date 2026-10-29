@@ -6,13 +6,34 @@ import (
 	"github.com/sendscore/sendscore/verdict"
 )
 
-// listUnsubURIs returns the URIs in List-Unsubscribe, in order.
+// listUnsubURIs returns the URIs in List-Unsubscribe, in order. RFC 2369
+// encloses each in angle brackets, so a comma inside one is part of the URI.
+// Comments in parentheses are ignored, and so is whitespace inside a URI.
 func (r *run) listUnsubURIs() []string {
+	return parseListURIs(r.msg.Header.Get("List-Unsubscribe"))
+}
+
+func parseListURIs(h string) []string {
 	var out []string
-	for _, part := range strings.Split(r.msg.Header.Get("List-Unsubscribe"), ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "<") && strings.HasSuffix(part, ">") {
-			out = append(out, strings.TrimSpace(part[1:len(part)-1]))
+	depth := 0
+	for i := 0; i < len(h); i++ {
+		switch c := h[i]; {
+		case c == '\\' && depth > 0:
+			i++
+		case c == '(':
+			depth++
+		case c == ')' && depth > 0:
+			depth--
+		case c == '<' && depth == 0:
+			end := strings.IndexByte(h[i:], '>')
+			if end < 0 {
+				return out
+			}
+			uri := strings.Join(strings.Fields(h[i+1:i+end]), "")
+			if uri != "" {
+				out = append(out, uri)
+			}
+			i += end
 		}
 	}
 	return out
@@ -20,8 +41,9 @@ func (r *run) listUnsubURIs() []string {
 
 func (r *run) unsubscribe() {
 	uris := r.listUnsubURIs()
+	present := strings.TrimSpace(r.msg.Header.Get("List-Unsubscribe")) != ""
 	https := ""
-	mailto := false
+	mailto, http := false, false
 	for _, u := range uris {
 		l := strings.ToLower(u)
 		if strings.HasPrefix(l, "https:") && https == "" {
@@ -29,6 +51,9 @@ func (r *run) unsubscribe() {
 		}
 		if strings.HasPrefix(l, "mailto:") {
 			mailto = true
+		}
+		if strings.HasPrefix(l, "http:") {
+			http = true
 		}
 	}
 	r.fp.ListUnsubscribe = len(uris) > 0
@@ -41,6 +66,17 @@ func (r *run) unsubscribe() {
 		c.Status, c.Title = verdict.Warn, "List-Unsubscribe has only a mailto address"
 		c.Detail = "One-click unsubscribe needs an https URL."
 		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Turn on one-click unsubscribe in your email platform."}
+	case http:
+		c.Status, c.Title = verdict.Fail, "List-Unsubscribe has an http link, not https"
+		c.Detail = "Gmail and Yahoo require an https link for one-click unsubscribe."
+		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to put an https unsubscribe link in List-Unsubscribe."}
+	case len(uris) > 0:
+		c.Status, c.Title = verdict.Fail, "List-Unsubscribe has no https link or mailto address"
+		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to put an https unsubscribe link in List-Unsubscribe."}
+	case present:
+		c.Status, c.Title = verdict.Fail, "List-Unsubscribe has no link in angle brackets"
+		c.Detail = "RFC 2369 requires each link to be enclosed in angle brackets, so receivers find none here."
+		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform to format List-Unsubscribe as <https://...>, with the link in angle brackets."}
 	default:
 		c.Status, c.Title = verdict.Fail, "No List-Unsubscribe header"
 		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Gmail and Yahoo require List-Unsubscribe on bulk mail. Turn on one-click unsubscribe in your email platform."}
@@ -68,7 +104,7 @@ func (r *run) unsubscribe() {
 	}
 	r.add(oc)
 
-	r.checkUnsubSigned(len(uris) > 0, post != "")
+	r.checkUnsubSigned(present, post != "")
 }
 
 // checkUnsubSigned: RFC 8058 requires a valid DKIM signature that covers
@@ -125,7 +161,7 @@ func (r *run) checkVisibleUnsub() {
 			}
 		}
 	}
-	if found == "" && strings.Contains(strings.ToLower(r.msg.Text), "unsubscribe") {
+	if found == "" && r.msg.HTML == "" && strings.Contains(strings.ToLower(r.msg.Text), "unsubscribe") {
 		found = "(plain text)"
 	}
 	if found != "" {

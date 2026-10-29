@@ -8,6 +8,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"slices"
 	"strings"
 
 	"blitiri.com.ar/go/spf"
@@ -24,6 +26,8 @@ const (
 	docsDMARC   = "https://www.rfc-editor.org/rfc/rfc7489"
 	docsRFC8058 = "https://www.rfc-editor.org/rfc/rfc8058"
 )
+
+const dkimBrokenFix = "Ask your email platform why its DKIM signature fails. Something is changing the message after signing, or the published key does not match."
 
 type dkimResult struct {
 	Domain     string
@@ -58,6 +62,8 @@ type dmarcRecord struct {
 	Domain string
 	Raw    string
 	Rec    *dmarc.Record
+	// Records lists every record when there is more than one.
+	Records []string
 }
 
 func (r *run) auth() {
@@ -199,7 +205,7 @@ func (r *run) verifyDKIM() {
 	default:
 		c.Status, c.Title = verdict.Fail, "No DKIM signature verifies"
 		c.Detail = "The message is signed, but no signature checks out against the published key."
-		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: "Ask your email platform why its DKIM signature fails; something is changing the message after signing, or the published key does not match."}
+		c.Fix = &verdict.Fix{Who: verdict.FixedByProvider, Text: dkimBrokenFix}
 	}
 	r.fp.Auth["dkim"] = c.Status
 	r.add(c)
@@ -294,6 +300,15 @@ func (r *run) checkSPF() {
 	if orgDomain(r.spfDom) == orgDomain(r.fromDom) {
 		who = verdict.FixedByYou
 	}
+	offline := err != nil && (errors.Is(err, ErrOffline) || strings.Contains(err.Error(), ErrOffline.Error()))
+	switch {
+	case offline:
+		res = spf.TempError
+	case res == spf.PermError && isDNSFailure(err):
+		// The library calls any lookup error that is not marked temporary a
+		// permerror. A failed lookup means SPF could not be evaluated.
+		res = spf.TempError
+	}
 	switch res {
 	case spf.Pass:
 		c.Status, c.Title = verdict.Pass, "SPF passes for "+r.spfDom
@@ -301,7 +316,12 @@ func (r *run) checkSPF() {
 		c.Status, c.Title = verdict.Warn, "SPF is neutral for "+r.spfDom
 		c.Fix = &verdict.Fix{Who: who, Text: "End the SPF record for " + r.spfDom + " with -all or ~all, and include your email platform."}
 	case spf.TempError:
-		c = skipped("auth.spf", verdict.Auth, "SPF not checked", "Temporary DNS failure: "+fmt.Sprint(err))
+		reason := "Temporary DNS failure. " + fmt.Sprint(err)
+		if offline {
+			reason = lookupFailed(ErrOffline)
+		}
+		c = skipped("auth.spf", verdict.Auth, "SPF not checked", reason)
+		r.spfTemp = true
 	default:
 		c.Status, c.Title = verdict.Fail, "SPF "+string(res)+" for "+r.spfDom
 		c.Fix = &verdict.Fix{Who: who, Text: "Add your email platform to the SPF record for " + r.spfDom + "."}
@@ -311,22 +331,24 @@ func (r *run) checkSPF() {
 	r.add(c)
 }
 
-// checkSPFLookups counts the DNS lookups the SPF record costs. Over ten is a
-// permanent error for every receiver (RFC 7208, section 4.6.4).
+// isDNSFailure is a lookup that failed, as opposed to a name that does not
+// exist or an error in the record itself.
+func isDNSFailure(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && !dnsErr.IsNotFound
+}
+
+// checkSPFLookups walks the SPF record the way a receiver does and reports
+// the permanent errors every receiver would hit (RFC 7208, section 4.6.4):
+// more than ten DNS lookups, more than two lookups that find nothing, more
+// than one SPF record, or an include with no SPF record.
 func (r *run) checkSPFLookups() {
 	if r.spfDom == "" {
 		r.add(skipped("auth.spf_lookups", verdict.Auth, "SPF record not inspected", "No Return-Path or envelope sender to look up."))
 		return
 	}
-	n, err := r.countSPF(r.spfDom, 0, map[string]bool{})
-	if err != nil && !errors.Is(err, errNoSPF) {
-		reason := lookupFailed(err)
-		if reason == "" {
-			reason = err.Error()
-		}
-		r.add(skipped("auth.spf_lookups", verdict.Auth, "SPF record not inspected", reason))
-		return
-	}
+	w := &spfWalk{r: r}
+	err := w.walk(r.spfDom, "")
 	if errors.Is(err, errNoSPF) {
 		r.add(verdict.Check{
 			ID: "auth.spf_lookups", Category: verdict.Auth, Status: verdict.Fail,
@@ -337,86 +359,253 @@ func (r *run) checkSPFLookups() {
 		})
 		return
 	}
+	if err != nil {
+		reason := lookupFailed(err)
+		if reason == "" || errors.Is(err, errSPFQueries) {
+			reason = err.Error()
+		}
+		r.add(skipped("auth.spf_lookups", verdict.Auth, "SPF record not inspected", reason))
+		return
+	}
 	c := verdict.Check{
 		ID: "auth.spf_lookups", Category: verdict.Auth, Docs: docsSPF + "#section-4.6.4",
-		Evidence: map[string]any{"domain": r.spfDom, "lookups": n, "limit": 10},
+		Evidence: map[string]any{
+			"domain": r.spfDom, "lookups": w.lookups, "limit": spfLookupLimit,
+			"void_lookups": len(w.voids),
+		},
 	}
+	if len(w.voids) > 0 {
+		c.Evidence["void_names"] = w.voids
+	}
+	who := verdict.FixedByProvider
+	if orgDomain(r.spfDom) == orgDomain(r.fromDom) {
+		who = verdict.FixedByYou
+	}
+	const permerror = "Receivers treat this as a permanent SPF error, so SPF fails for every message."
 	switch {
-	case n > 10:
-		c.Status, c.Title = verdict.Fail, fmt.Sprintf("SPF needs %d DNS lookups (limit 10)", n)
+	case w.problem != nil:
+		p := w.problem
+		c.Status, c.Detail = verdict.Fail, permerror
+		c.Evidence["problem"], c.Evidence["problem_domain"] = p.kind, p.domain
+		switch p.kind {
+		case "multiple":
+			c.Title = "More than one SPF record for " + p.domain
+			c.Fix = &verdict.Fix{Who: who, Text: "Merge the SPF records for " + p.domain + " into one TXT record that starts with v=spf1."}
+		case "include":
+			c.Title = "SPF includes " + p.domain + ", which has no SPF record"
+			c.Fix = &verdict.Fix{Who: who, Text: "Remove include:" + p.domain + " from the SPF record for " + r.spfDom + ", or correct the domain name."}
+		case "redirect":
+			c.Title = "SPF redirects to " + p.domain + ", which has no SPF record"
+			c.Fix = &verdict.Fix{Who: who, Text: "Point redirect= in the SPF record for " + r.spfDom + " at a domain that publishes SPF."}
+		case "loop":
+			c.Title = "SPF record for " + p.domain + " includes itself"
+			c.Fix = &verdict.Fix{Who: who, Text: "Remove the include or redirect that leads back to " + p.domain + " from the SPF record."}
+		case "voids":
+			c.Title = "SPF has more than two lookups that find nothing"
+			c.Fix = &verdict.Fix{Who: who, Text: "Remove the mechanisms in the SPF record for " + r.spfDom + " that name hosts with no DNS records."}
+		}
+	case w.lookups > spfLookupLimit:
+		c.Status, c.Title, c.Detail = verdict.Fail, "SPF needs more than 10 DNS lookups", permerror
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Remove includes you no longer use from the SPF record for " + r.spfDom + "."}
-	case n >= 8:
-		c.Status, c.Title = verdict.Warn, fmt.Sprintf("SPF needs %d of 10 DNS lookups", n)
+	case w.lookups >= 8:
+		c.Status, c.Title = verdict.Warn, fmt.Sprintf("SPF needs %d of 10 DNS lookups", w.lookups)
 		c.Detail = "One more include will break SPF for every message."
 	default:
-		c.Status, c.Title = verdict.Pass, fmt.Sprintf("SPF needs %d of 10 DNS lookups", n)
+		c.Status, c.Title = verdict.Pass, fmt.Sprintf("SPF needs %d of 10 DNS lookups", w.lookups)
 	}
 	r.add(c)
 }
 
-var errNoSPF = errors.New("no SPF record")
+const (
+	spfLookupLimit = 10
+	spfVoidLimit   = 2
+	// maxSPFQueries bounds the DNS queries one walk makes. The walk stops at
+	// the lookup limit long before this; it is a backstop.
+	maxSPFQueries = 40
+)
 
-func (r *run) spfRecord(domain string) (string, error) {
-	txts, err := r.lookupTXT(domain)
+var (
+	errNoSPF       = errors.New("no SPF record")
+	errMultipleSPF = errors.New("more than one SPF record")
+	errSPFQueries  = fmt.Errorf("Stopped after %d DNS queries without finishing the SPF record.", maxSPFQueries)
+)
+
+// spfWalk counts lookups per include path, as receivers do, so an include
+// reached twice is counted twice. It stops at the first permanent error.
+type spfWalk struct {
+	r       *run
+	lookups int
+	voids   []string
+	queries int
+	path    []string
+	problem *spfProblem
+}
+
+type spfProblem struct{ kind, domain string }
+
+func (w *spfWalk) done() bool { return w.problem != nil || w.lookups > spfLookupLimit }
+
+func (w *spfWalk) fail(kind, domain string) {
+	if w.problem == nil {
+		w.problem = &spfProblem{kind, domain}
+	}
+}
+
+func (w *spfWalk) record(domain string) (string, error) {
+	if w.queries++; w.queries > maxSPFQueries {
+		return "", errSPFQueries
+	}
+	txts, err := w.r.lookupTXT(domain)
 	if err != nil {
 		if lookupFailed(err) == "" {
 			return "", errNoSPF
 		}
 		return "", err
 	}
+	var recs []string
 	for _, t := range txts {
-		if strings.HasPrefix(strings.ToLower(t), "v=spf1") {
-			return t, nil
+		if l := strings.ToLower(t); l == "v=spf1" || strings.HasPrefix(l, "v=spf1 ") {
+			recs = append(recs, t)
 		}
 	}
-	return "", errNoSPF
+	switch len(recs) {
+	case 0:
+		return "", errNoSPF
+	case 1:
+		return recs[0], nil
+	}
+	return "", errMultipleSPF
 }
 
-func (r *run) countSPF(domain string, depth int, seen map[string]bool) (int, error) {
-	if depth > 10 || seen[domain] {
-		return 0, nil
+// walk follows one record. via is how it was reached: "" for the top,
+// "include", or "redirect". Only DNS failures come back as errors.
+func (w *spfWalk) walk(domain, via string) error {
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	if strings.Contains(domain, "%") {
+		// A name built from macros depends on the sender, so it is counted
+		// but not followed.
+		return nil
 	}
-	seen[domain] = true
-	rec, err := r.spfRecord(domain)
-	if err != nil {
-		if depth > 0 && errors.Is(err, errNoSPF) {
-			return 0, nil
+	if slices.Contains(w.path, domain) {
+		w.fail("loop", domain)
+		return nil
+	}
+	rec, err := w.record(domain)
+	switch {
+	case errors.Is(err, errNoSPF) && via != "":
+		w.fail(via, domain)
+		return nil
+	case errors.Is(err, errMultipleSPF):
+		w.fail("multiple", domain)
+		return nil
+	case err != nil:
+		return err
+	}
+	w.path = append(w.path, domain)
+	defer func() { w.path = w.path[:len(w.path)-1] }()
+
+	redirect, hasAll := "", false
+	for _, term := range strings.Fields(rec)[1:] {
+		if w.done() {
+			return nil
 		}
-		return 0, err
+		t := strings.ToLower(term)
+		if v, ok := strings.CutPrefix(t, "redirect="); ok {
+			redirect = v
+			continue
+		}
+		mech, target := spfMechanism(strings.TrimLeft(t, "+-~?"))
+		if target == "" {
+			target = domain
+		}
+		switch mech {
+		case "all":
+			hasAll = true
+			continue
+		case "include", "a", "mx", "ptr", "exists":
+		default:
+			continue
+		}
+		if w.lookups++; w.done() {
+			return nil
+		}
+		switch mech {
+		case "include":
+			err = w.walk(target, "include")
+		case "a", "mx", "exists":
+			err = w.resolve(mech, target)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	// A redirect only applies when the record has no all mechanism
+	// (RFC 7208, section 6.1).
+	if redirect == "" || hasAll || w.done() {
+		return nil
+	}
+	if w.lookups++; w.done() {
+		return nil
+	}
+	return w.walk(redirect, "redirect")
+}
+
+// resolve looks up the host an a, mx, or exists mechanism names, to count the
+// lookups that find nothing. A name built from macros depends on the sender,
+// so it is not looked up.
+func (w *spfWalk) resolve(mech, host string) error {
+	if strings.Contains(host, "%") {
+		return nil
+	}
+	if w.queries++; w.queries > maxSPFQueries {
+		return errSPFQueries
 	}
 	n := 0
-	for _, term := range strings.Fields(rec)[1:] {
-		t := strings.ToLower(strings.TrimLeft(term, "+-~?"))
-		switch {
-		case strings.HasPrefix(t, "include:"):
-			n++
-			sub, err := r.countSPF(strings.TrimPrefix(t, "include:"), depth+1, seen)
-			if err != nil && lookupFailed(err) != "" {
-				return 0, err
-			}
-			n += sub
-		case strings.HasPrefix(t, "redirect="):
-			n++
-			sub, err := r.countSPF(strings.TrimPrefix(t, "redirect="), depth+1, seen)
-			if err != nil && lookupFailed(err) != "" {
-				return 0, err
-			}
-			n += sub
-		case t == "a" || strings.HasPrefix(t, "a:") || strings.HasPrefix(t, "a/"),
-			t == "mx" || strings.HasPrefix(t, "mx:") || strings.HasPrefix(t, "mx/"),
-			t == "ptr" || strings.HasPrefix(t, "ptr:"),
-			strings.HasPrefix(t, "exists:"):
-			n++
+	var err error
+	if mech == "mx" {
+		var mxs []*net.MX
+		mxs, err = w.r.res.LookupMX(w.r.ctx, host)
+		n = len(mxs)
+	} else {
+		var ips []net.IPAddr
+		ips, err = w.r.res.LookupIPAddr(w.r.ctx, host)
+		n = len(ips)
+	}
+	if lookupFailed(err) != "" {
+		return err
+	}
+	if n == 0 {
+		w.voids = append(w.voids, host)
+		if len(w.voids) > spfVoidLimit {
+			w.fail("voids", host)
 		}
 	}
-	return n, nil
+	return nil
 }
 
+// spfMechanism splits "mx:example.com/24" into "mx" and "example.com".
+func spfMechanism(t string) (string, string) {
+	name, target := t, ""
+	if i := strings.IndexAny(t, ":/"); i >= 0 {
+		name = t[:i]
+		if t[i] == ':' {
+			target = t[i+1:]
+		}
+	}
+	if i := strings.Index(target, "/"); i >= 0 {
+		target = target[:i]
+	}
+	return name, target
+}
+
+var errMultipleDMARC = errors.New("more than one DMARC record")
+
 // lookupDMARC finds the policy for the From domain, falling back to its
-// organizational domain (RFC 7489, section 6.6.3).
+// organizational domain (RFC 7489, section 6.6.3). More than one record at a
+// name ends discovery, and no policy applies.
 func (r *run) lookupDMARC() (*dmarcRecord, error) {
 	if r.fromDom == "" {
-		return nil, errors.New("no From domain")
+		return nil, errors.New("The message has no From domain.")
 	}
 	domains := []string{r.fromDom}
 	if org := orgDomain(r.fromDom); org != r.fromDom {
@@ -430,107 +619,186 @@ func (r *run) lookupDMARC() (*dmarcRecord, error) {
 			}
 			continue
 		}
+		var recs []string
 		for _, t := range txts {
-			if !strings.HasPrefix(t, "v=DMARC1") {
-				continue
+			if strings.HasPrefix(t, "v=DMARC1") {
+				recs = append(recs, t)
 			}
-			rec, err := dmarc.Parse(t)
-			if err != nil {
-				return &dmarcRecord{Domain: d, Raw: t}, err
-			}
-			return &dmarcRecord{Domain: d, Raw: t, Rec: rec}, nil
 		}
+		switch {
+		case len(recs) == 0:
+			continue
+		case len(recs) > 1:
+			return &dmarcRecord{Domain: d, Records: recs}, errMultipleDMARC
+		}
+		rec, err := dmarc.Parse(recs[0])
+		if err != nil {
+			return &dmarcRecord{Domain: d, Raw: recs[0]}, err
+		}
+		return &dmarcRecord{Domain: d, Raw: recs[0], Rec: rec}, nil
 	}
 	return nil, dmarc.ErrNoPolicy
 }
 
-func (r *run) checkDMARCRecord() {
+// policy is the policy that applies to the From domain: sp= when the record
+// came from the organizational domain and sets one, p= otherwise.
+func (d *dmarcRecord) policy(fromDom string) (dmarc.Policy, string) {
+	if d.Domain != fromDom && d.Rec.SubdomainPolicy != "" {
+		return d.Rec.SubdomainPolicy, "sp"
+	}
+	return d.Rec.Policy, "p"
+}
+
+// dmarcUnknown says why the DMARC record could not be read, or "" when it
+// was read or does not exist.
+func (r *run) dmarcUnknown() string {
 	rec, err := r.dmarcRec, r.dmarcErr
-	if rec == nil && err != nil && !errors.Is(err, dmarc.ErrNoPolicy) {
-		reason := lookupFailed(err)
-		if reason == "" {
-			reason = err.Error()
-		}
+	if rec != nil || err == nil || errors.Is(err, dmarc.ErrNoPolicy) {
+		return ""
+	}
+	if reason := lookupFailed(err); reason != "" {
+		return reason
+	}
+	return err.Error()
+}
+
+func (r *run) checkDMARCRecord() {
+	if reason := r.dmarcUnknown(); reason != "" {
 		r.add(skipped("auth.dmarc_record", verdict.Auth, "DMARC record not checked", reason))
 		return
 	}
+	rec, err := r.dmarcRec, r.dmarcErr
 	c := verdict.Check{ID: "auth.dmarc_record", Category: verdict.Auth, Docs: docsGmail}
 	switch {
 	case rec == nil:
 		c.Status, c.Title = verdict.Fail, "No DMARC record for "+r.fromDom
 		c.Evidence = map[string]any{"domain": r.fromDom}
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Publish a TXT record at _dmarc." + orgDomain(r.fromDom) + " such as \"v=DMARC1; p=none; rua=mailto:dmarc@" + orgDomain(r.fromDom) + "\"."}
+	case len(rec.Records) > 1:
+		c.Status, c.Title = verdict.Fail, "More than one DMARC record at _dmarc."+rec.Domain
+		c.Detail = "When a domain publishes more than one DMARC record, receivers apply none of them, so the domain has no DMARC policy."
+		c.Evidence = map[string]any{"domain": rec.Domain, "records": rec.Records}
+		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Delete all but one of the DMARC records at _dmarc." + rec.Domain + "."}
 	case rec.Rec == nil:
 		c.Status, c.Title = verdict.Fail, "DMARC record does not parse"
 		c.Evidence = map[string]any{"domain": rec.Domain, "record": rec.Raw, "error": fmt.Sprint(err)}
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Fix the syntax of the DMARC record at _dmarc." + rec.Domain + "."}
 	default:
-		c.Evidence = map[string]any{"domain": rec.Domain, "record": rec.Raw, "policy": string(rec.Rec.Policy)}
-		if rec.Rec.Policy == dmarc.PolicyNone && len(rec.Rec.ReportURIAggregate) == 0 {
+		p, tag := rec.policy(r.fromDom)
+		c.Evidence = map[string]any{"domain": rec.Domain, "record": rec.Raw, "policy": string(p), "policy_tag": tag}
+		if p == dmarc.PolicyNone && len(rec.Rec.ReportURIAggregate) == 0 {
 			c.Status, c.Title = verdict.Warn, "DMARC policy is none, with no reports"
-			c.Detail = "p=none meets the bulk sender rules, but without rua you never see who is sending as your domain."
+			c.Detail = "A policy of none meets the bulk sender rules, but without rua you never see who is sending as your domain."
 			c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Add rua=mailto:... to the DMARC record so you receive aggregate reports."}
 		} else {
-			c.Status, c.Title = verdict.Pass, "DMARC policy is "+string(rec.Rec.Policy)
+			c.Status, c.Title = verdict.Pass, "DMARC policy is "+string(p)
 		}
 	}
 	r.add(c)
 }
 
-func (r *run) checkDMARC() {
-	dkimAligned := false
+// authAlignment is what DMARC needs from DKIM and SPF. unknown is set when a
+// DNS failure hid a result that could have aligned, so neither a pass nor a
+// failure can be claimed.
+type authAlignment struct {
+	dkim, spf bool
+	unknown   bool
+	// dkimBroken is a signature for the From domain that did not verify.
+	dkimBroken string
+}
+
+func (r *run) alignment() authAlignment {
+	var a authAlignment
 	for _, d := range r.dkim {
-		if d.Result == "pass" && d.Aligned {
-			dkimAligned = true
+		if !aligned(d.Domain, r.fromDom, r.dkimMode()) {
+			continue
+		}
+		switch d.Result {
+		case "pass":
+			a.dkim = true
+		case "temperror":
+			a.unknown = true
+		default:
+			a.dkimBroken = d.Domain
 		}
 	}
-	spfAligned := r.spfRes == verdict.Pass && aligned(r.spfDom, r.fromDom, r.spfMode())
-	ev := map[string]any{"from_domain": r.fromDom, "dkim_aligned": dkimAligned, "spf_aligned": spfAligned}
-	if r.dmarcRec != nil && r.dmarcRec.Rec != nil {
-		ev["policy"] = string(r.dmarcRec.Rec.Policy)
+	a.spf = r.spfRes == verdict.Pass && aligned(r.spfDom, r.fromDom, r.spfMode())
+	if r.spfTemp && aligned(r.spfDom, r.fromDom, r.spfMode()) {
+		a.unknown = true
+	}
+	if r.fp.Auth["dkim"] == verdict.Skipped && r.spfRes == verdict.Skipped {
+		a.unknown = true
+	}
+	if a.dkim || a.spf {
+		a.unknown = false
+	}
+	return a
+}
+
+func (r *run) checkDMARC() {
+	a := r.alignment()
+	ev := map[string]any{"from_domain": r.fromDom, "dkim_aligned": a.dkim, "spf_aligned": a.spf}
+	hasPolicy := r.dmarcRec != nil && r.dmarcRec.Rec != nil
+	if hasPolicy {
+		p, _ := r.dmarcRec.policy(r.fromDom)
+		ev["policy"] = string(p)
 	}
 	c := verdict.Check{ID: "auth.dmarc", Category: verdict.Auth, Evidence: ev, Docs: docsDMARC}
+	dkimFix := &verdict.Fix{Who: verdict.FixedByYou, Text: "Set up DKIM with your own domain (" + r.fromDom + ") in your email platform, so messages are signed as you rather than as the platform."}
+	if a.dkimBroken != "" {
+		// The domain is set up. Its signature breaks, which auth.dkim reports.
+		dkimFix = &verdict.Fix{Who: verdict.FixedByProvider, Text: dkimBrokenFix}
+	}
 	switch {
-	case dkimAligned || spfAligned:
+	case r.dmarcUnknown() != "":
+		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The DMARC record could not be read. "+r.dmarcUnknown())
+	case !hasPolicy:
+		c.Status, c.Title = verdict.Info, "No DMARC policy applies"
+		c.Detail = "Without exactly one valid DMARC record, the DMARC result is none whatever aligns. See auth.dmarc_record."
+	case a.dkim || a.spf:
 		c.Status, c.Title = verdict.Pass, "DMARC passes"
-	case r.fp.Auth["dkim"] == verdict.Skipped && r.spfRes == verdict.Skipped:
-		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "Neither DKIM nor SPF could be checked.")
-	case r.spfRes == verdict.Skipped && !dkimAligned:
+	case a.unknown:
+		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "DKIM or SPF could not be checked because DNS failed or was offline, and either could have aligned. Try again.")
+	case r.spfRes == verdict.Skipped:
 		c.Status, c.Title = verdict.Fail, "DMARC does not align through DKIM"
-		c.Detail = "SPF was not checked, and no DKIM signature uses the From domain " + r.fromDom + "."
-		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Set up DKIM with your own domain (" + r.fromDom + ") in your email platform, so messages are signed as you rather than as the platform."}
+		if a.dkimBroken != "" {
+			c.Detail = "SPF was not checked, and the DKIM signature for " + a.dkimBroken + " does not verify."
+		} else {
+			c.Detail = "SPF was not checked, and no DKIM signature uses the From domain " + r.fromDom + "."
+		}
+		c.Fix = dkimFix
 	default:
 		c.Status, c.Title = verdict.Fail, "DMARC does not align"
-		c.Detail = "Neither a passing DKIM signature nor a passing SPF check uses the From domain " + r.fromDom + "."
-		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Set up DKIM with your own domain (" + r.fromDom + ") in your email platform, so messages are signed as you rather than as the platform."}
+		if a.dkimBroken != "" {
+			c.Detail = "SPF does not pass for the From domain " + r.fromDom + ", and the DKIM signature for " + a.dkimBroken + " does not verify."
+		} else {
+			c.Detail = "Neither a passing DKIM signature nor a passing SPF check uses the From domain " + r.fromDom + "."
+		}
+		c.Fix = dkimFix
 	}
 	r.fp.Auth["dmarc"] = c.Status
 	r.add(c)
 }
 
 func (r *run) checkAlignment() {
-	dkimAligned := false
-	for _, d := range r.dkim {
-		if d.Result == "pass" && d.Aligned {
-			dkimAligned = true
-		}
-	}
-	spfAligned := r.spfRes == verdict.Pass && aligned(r.spfDom, r.fromDom, r.spfMode())
+	a := r.alignment()
 	c := verdict.Check{
 		ID: "auth.alignment", Category: verdict.Auth,
 		Evidence: map[string]any{
 			"from_domain": r.fromDom, "spf_domain": r.spfDom,
 			"dkim_mode": string(r.dkimMode()), "spf_mode": string(r.spfMode()),
-			"dkim_aligned": dkimAligned, "spf_aligned": spfAligned,
+			"dkim_aligned": a.dkim, "spf_aligned": a.spf,
 		},
 	}
 	switch {
-	case dkimAligned:
+	case a.dkim:
 		c.Status, c.Title = verdict.Pass, "DKIM aligns with the From domain"
-	case spfAligned:
+	case a.spf:
 		c.Status, c.Title = verdict.Warn, "Only SPF aligns with the From domain"
 		c.Detail = "SPF alignment breaks when a subscriber forwards the message. DKIM alignment survives it."
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Set up DKIM with your own domain as well."}
+	case a.unknown:
+		c = skipped("auth.alignment", verdict.Auth, "Alignment not checked", "DKIM or SPF could not be checked, so whether they align is unknown.")
 	default:
 		c.Status, c.Title = verdict.Info, "Nothing aligns with the From domain"
 		c.Detail = "See auth.dmarc."

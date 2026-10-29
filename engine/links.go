@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -45,8 +46,29 @@ func isActionLink(u string, listUnsub []string) bool {
 	return false
 }
 
-// SafeHTTPClient refuses to connect to loopback, private, and link-local
-// addresses, so a message's links cannot reach the checker's own network.
+// Words in a link's visible text that mean following it does something to
+// a subscription. Click tracking often hides the real URL, so the text is
+// the only sign.
+var actionTextWords = []string{
+	"unsubscribe", "unsub", "opt out", "opt-out", "optout", "preferences", "preference center",
+	"manage subscription", "manage your subscription", "manage subscriptions", "subscription settings",
+	"email settings", "update your profile", "confirm", "remove me", "stop receiving",
+}
+
+func isActionText(text string) bool {
+	l := strings.ToLower(text)
+	for _, w := range actionTextWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// SafeHTTPClient refuses to connect to loopback, private, link-local, and
+// other non-public addresses, so a message's links cannot reach the
+// checker's own network. It never follows a redirect into an unsubscribe,
+// confirm, or preferences URL.
 func SafeHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
@@ -72,6 +94,9 @@ func SafeHTTPClient() *http.Client {
 		Transport: tr,
 		Timeout:   linkTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if isActionLink(req.URL.String(), nil) {
+				return http.ErrUseLastResponse
+			}
 			if len(via) >= maxRedirects {
 				return errors.New("too many redirects")
 			}
@@ -80,10 +105,42 @@ func SafeHTTPClient() *http.Client {
 	}
 }
 
+// Special purpose ranges that are not the public internet, from the IANA
+// IPv4 and IPv6 special purpose address registries.
+var nonPublic = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "::ffff:0:0/96", "64:ff9b:1::/48", "100::/64", "2001::/23",
+		"2001:db8::/32", "2002::/16", "3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10",
+		"fec0::/10", "ff00::/8",
+	} {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}()
+
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
 func publicIP(ip net.IP) bool {
-	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
-		ip.IsInterfaceLocalMulticast())
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	// NAT64 reaches the IPv4 address in the last four bytes.
+	if nat64.Contains(a) {
+		b := a.As16()
+		a = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	}
+	for _, p := range nonPublic {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 type linkResult struct {
@@ -94,15 +151,17 @@ type linkResult struct {
 
 func (r *run) checkLinks() {
 	if !r.opts.CheckLinks {
-		r.add(skipped("content.links", verdict.Content, "Links not checked", "Link checking is off. Pass --links to fetch every link."))
-		r.add(skipped("content.images", verdict.Content, "Images not checked", "Link checking is off. Pass --links to fetch every image."))
+		r.add(skipped("content.links", verdict.Content, "Links not checked", "Link checking is off."))
+		r.add(skipped("content.images", verdict.Content, "Images not checked", "Link checking is off."))
 		return
 	}
-	client := r.opts.HTTPClient
-	if client == nil {
-		client = SafeHTTPClient()
+	base := r.opts.HTTPClient
+	if base == nil {
+		base = SafeHTTPClient()
 	}
 	unsub := r.listUnsubURIs()
+	stops := &redirectStops{to: map[string]string{}}
+	client := guardRedirects(base, unsub, stops)
 
 	var links, skippedActions []string
 	seen := map[string]bool{}
@@ -112,7 +171,7 @@ func (r *run) checkLinks() {
 			continue
 		}
 		seen[u] = true
-		if isActionLink(u, unsub) {
+		if isActionLink(u, unsub) || isActionText(l.Text) {
 			skippedActions = append(skippedActions, u)
 			continue
 		}
@@ -126,8 +185,49 @@ func (r *run) checkLinks() {
 		}
 	}
 
-	r.add(r.fetchCheck(client, "content.links", "link", links, skippedActions))
-	r.add(r.fetchCheck(client, "content.images", "image", images, nil))
+	r.add(r.fetchCheck(client, stops, "content.links", "link", links, skippedActions))
+	r.add(r.fetchCheck(client, stops, "content.images", "image", images, nil))
+}
+
+// redirectStops records the redirects that were not followed because they
+// lead to an unsubscribe, confirm, or preferences URL.
+type redirectStops struct {
+	mu sync.Mutex
+	to map[string]string
+}
+
+func (s *redirectStops) get(u string) (string, bool) {
+	if p, err := url.Parse(u); err == nil {
+		u = p.String()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.to[u]
+	return t, ok
+}
+
+// guardRedirects returns a copy of the client that stops, without
+// following, at any redirect into an action URL, whatever the client's own
+// redirect policy.
+func guardRedirects(base *http.Client, unsub []string, stops *redirectStops) *http.Client {
+	c := *base
+	next := base.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if isActionLink(req.URL.String(), unsub) {
+			stops.mu.Lock()
+			stops.to[via[0].URL.String()] = req.URL.String()
+			stops.mu.Unlock()
+			return http.ErrUseLastResponse
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		if len(via) >= maxRedirects {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}
+	return &c
 }
 
 func fetchable(u string) bool {
@@ -135,7 +235,7 @@ func fetchable(u string) bool {
 	return err == nil && (p.Scheme == "http" || p.Scheme == "https") && p.Host != ""
 }
 
-func (r *run) fetchCheck(client *http.Client, id, noun string, urls, actions []string) verdict.Check {
+func (r *run) fetchCheck(client *http.Client, stops *redirectStops, id, noun string, urls, actions []string) verdict.Check {
 	truncated := false
 	if len(urls) > maxLinkChecks {
 		urls, truncated = urls[:maxLinkChecks], true
@@ -155,19 +255,28 @@ func (r *run) fetchCheck(client *http.Client, id, noun string, urls, actions []s
 	wg.Wait()
 
 	var broken []linkResult
+	var stopped []map[string]string
 	for _, res := range results {
+		if to, ok := stops.get(res.URL); ok {
+			stopped = append(stopped, map[string]string{"url": res.URL, "redirects_to": to})
+			continue
+		}
 		if res.Error != "" || res.Status >= 400 {
 			broken = append(broken, res)
 		}
 	}
-	ev := map[string]any{"checked": len(urls), "broken": broken}
+	ev := map[string]any{"checked": len(urls)}
+	capped(ev, "broken", broken)
 	if len(actions) > 0 {
-		ev["not_followed"] = actions
+		capped(ev, "not_followed", actions)
+	}
+	if len(stopped) > 0 {
+		capped(ev, "redirect_not_followed", stopped)
 	}
 	if truncated {
 		ev["truncated_at"] = maxLinkChecks
 	}
-	c := verdict.Check{ID: id, Category: verdict.Content, Evidence: ev}
+	c := verdict.Check{ID: id, Category: verdict.Content, Evidence: r.noteLimit(ev)}
 	switch {
 	case len(urls) == 0:
 		c.Status, c.Title = verdict.Info, "No "+noun+"s to check"

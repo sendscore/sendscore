@@ -184,33 +184,61 @@ func (s *stripSpace) Read(p []byte) (int, error) {
 	return j, err
 }
 
+// Limits on the header block. Real mail carries a few dozen headers in a
+// few kilobytes; these stop a hostile message from costing more than that.
+const (
+	maxHeaderBytes = 1 << 20
+	maxHeaders     = 1000
+)
+
 // rawHeaders reads the header block in order, unfolding continuation lines.
-// The DKIM check needs the order, which mail.Header does not keep.
+// The DKIM check needs the order, which mail.Header does not keep. Each
+// header's lines are collected and joined once, so a header folded across
+// many lines costs linear time.
 func rawHeaders(raw []byte) ([]header, error) {
 	sc := bufio.NewScanner(bytes.NewReader(raw))
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	var out []header
+	var parts []string
+	flush := func() {
+		if len(out) > 0 && len(parts) > 0 {
+			out[len(out)-1].Value = strings.Join(parts, " ")
+		}
+		parts = parts[:0]
+	}
+	size := 0
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		if line == "" {
+			flush()
 			return out, nil
+		}
+		size += len(line) + 2
+		if size > maxHeaderBytes {
+			return nil, fmt.Errorf("not an email message: the header block is larger than %d KB", maxHeaderBytes>>10)
 		}
 		if line[0] == ' ' || line[0] == '\t' {
 			if len(out) == 0 {
 				return nil, errors.New("not an email message: starts with a continuation line")
 			}
-			out[len(out)-1].Value += " " + strings.TrimSpace(line)
+			parts = append(parts, strings.TrimSpace(line))
 			continue
 		}
 		name, value, ok := strings.Cut(line, ":")
 		if !ok {
 			return nil, fmt.Errorf("not an email message: bad header line %q", truncate(line, 60))
 		}
-		out = append(out, header{Name: strings.TrimSpace(name), Value: strings.TrimSpace(value)})
+		flush()
+		if len(out) >= maxHeaders {
+			return nil, fmt.Errorf("not an email message: more than %d header fields", maxHeaders)
+		}
+		out = append(out, header{Name: strings.TrimSpace(name)})
+		parts = append(parts, strings.TrimSpace(value))
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+	flush()
 	return out, nil
 }
 

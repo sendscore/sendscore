@@ -31,17 +31,48 @@ func rollUp(v *verdict.Verdict, blocking []verdict.Category) {
 			warns++
 		}
 	}
+	// When DMARC could not be evaluated, nothing shows the message is
+	// authenticated, so it is not ready, and it is never a pass.
+	unchecked := slices.Contains(blocking, verdict.Auth) && authUnchecked(v.Checks)
+	if unchecked {
+		v.ReadyToSend = false
+	}
 	switch {
 	case fails > 0:
 		v.Verdict = verdict.Fail
-	case warns > 0:
+	case warns > 0 || unchecked:
 		v.Verdict = verdict.Warn
 	default:
 		v.Verdict = verdict.Pass
 	}
 
 	v.TopFixes = topFixes(v.Checks, blocking)
+	if unchecked {
+		retry := verdict.TopFix{Check: "auth.dmarc", Who: verdict.FixedByYou, Fix: retryAuthFix}
+		v.TopFixes = append([]verdict.TopFix{retry}, v.TopFixes...)
+		if len(v.TopFixes) > maxTopFixes {
+			v.TopFixes = v.TopFixes[:maxTopFixes]
+		}
+	}
 	v.Summary = summary(v, fails, warns)
+	if unchecked {
+		v.Summary = strings.TrimSpace(authUncheckedSummary + " " + strings.TrimPrefix(v.Summary, "Every check that ran passed."))
+	}
+}
+
+const (
+	authUncheckedSummary = "Authentication could not be checked, so this is not ready to send."
+	retryAuthFix         = "Run the check again once DNS lookups work. DKIM, SPF, and DMARC could not be evaluated, which does not mean they are wrong."
+)
+
+// authUnchecked is true when auth.dmarc was skipped.
+func authUnchecked(checks []verdict.Check) bool {
+	for _, c := range checks {
+		if c.ID == "auth.dmarc" && c.Status == verdict.Skipped {
+			return true
+		}
+	}
+	return false
 }
 
 // topFixes orders blocking failures first, then other failures, then

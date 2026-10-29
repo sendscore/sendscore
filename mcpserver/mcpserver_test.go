@@ -36,7 +36,15 @@ func sampleVerdict(t *testing.T, id string, mutate func([]byte) []byte) *verdict
 
 // fakeAPI serves the app's JSON API from memory.
 func fakeAPI(t *testing.T, reports map[string]*verdict.Verdict, arriveAfter int32) (*httptest.Server, *atomic.Int32) {
+	srv, waits, _ := fakeAPIAfter(t, reports, arriveAfter)
+	return srv, waits
+}
+
+// fakeAPIAfter is fakeAPI, also recording the after parameter of each wait.
+func fakeAPIAfter(t *testing.T, reports map[string]*verdict.Verdict, arriveAfter int32) (*httptest.Server, *atomic.Int32, *atomic.Value) {
 	waits := &atomic.Int32{}
+	after := &atomic.Value{}
+	after.Store("")
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/test-addresses", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
@@ -50,6 +58,7 @@ func fakeAPI(t *testing.T, reports map[string]*verdict.Verdict, arriveAfter int3
 			http.Error(w, `{"error":"no such test address"}`, http.StatusNotFound)
 			return
 		}
+		after.Store(r.URL.Query().Get("after"))
 		if waits.Add(1) <= arriveAfter {
 			json.NewEncoder(w).Encode(map[string]any{"status": "not_received"})
 			return
@@ -66,7 +75,7 @@ func fakeAPI(t *testing.T, reports map[string]*verdict.Verdict, arriveAfter int3
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, waits
+	return srv, waits, after
 }
 
 func connect(t *testing.T, b Backend) *mcp.ClientSession {
@@ -168,4 +177,49 @@ func TestWaitTimesOutQuietly(t *testing.T) {
 	if got.Status != "not_received" {
 		t.Errorf("wait = %+v", got)
 	}
+}
+
+func TestWaitPassesAfter(t *testing.T) {
+	reports := map[string]*verdict.Verdict{"rpt_new": sampleVerdict(t, "rpt_new", nil)}
+	srv, _, after := fakeAPIAfter(t, reports, 0)
+	cs := connect(t, &HTTPBackend{BaseURL: srv.URL, Token: "tok"})
+
+	var got WaitOut
+	call(t, cs, "wait_for_message", map[string]any{"token": "abc", "timeout_seconds": 2, "after_report_id": "rpt_old"}, &got)
+	if got.Status != "received" || got.ReportID != "rpt_new" {
+		t.Errorf("wait = %+v", got)
+	}
+	if a := after.Load().(string); a != "rpt_old" {
+		t.Errorf("after = %q, want rpt_old", a)
+	}
+
+	call(t, cs, "wait_for_message", map[string]any{"token": "abc", "timeout_seconds": 2}, &got)
+	if a := after.Load().(string); a != "" {
+		t.Errorf("after without after_report_id = %q, want empty", a)
+	}
+}
+
+func TestWaitIsCapped(t *testing.T) {
+	b := &recordingBackend{}
+	cs := connect(t, b)
+	call(t, cs, "wait_for_message", map[string]any{"token": "abc", "timeout_seconds": 600}, nil)
+	if b.timeout != maxWait || maxWait > 50*time.Second || apiMaxWait > 50*time.Second {
+		t.Errorf("timeout = %s, maxWait = %s, apiMaxWait = %s", b.timeout, maxWait, apiMaxWait)
+	}
+}
+
+// recordingBackend records the wait it was asked for and reports nothing.
+type recordingBackend struct{ timeout time.Duration }
+
+func (b *recordingBackend) CreateTestAddress(context.Context) (TestAddress, error) {
+	return TestAddress{}, nil
+}
+
+func (b *recordingBackend) Wait(_ context.Context, _, _ string, timeout time.Duration) (*verdict.Verdict, error) {
+	b.timeout = timeout
+	return nil, ErrNotReceived
+}
+
+func (b *recordingBackend) Report(context.Context, string) (*verdict.Verdict, error) {
+	return nil, ErrNotFound
 }

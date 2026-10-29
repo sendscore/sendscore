@@ -27,9 +27,12 @@ type TestAddress struct {
 // Backend is where the tools get their data.
 type Backend interface {
 	CreateTestAddress(ctx context.Context) (TestAddress, error)
-	// Wait blocks up to timeout for a message at the address. It returns
-	// ErrNotReceived when none arrived in time.
-	Wait(ctx context.Context, token string, timeout time.Duration) (*verdict.Verdict, error)
+	// Wait blocks up to timeout for a message at the address. With after
+	// set to a report ID from the same address, only a message received
+	// after that report counts; without it, the newest message does, even
+	// one that arrived before the call. It returns ErrNotReceived when none
+	// arrived in time.
+	Wait(ctx context.Context, token, after string, timeout time.Duration) (*verdict.Verdict, error)
 	Report(ctx context.Context, id string) (*verdict.Verdict, error)
 }
 
@@ -40,10 +43,11 @@ var ErrNotReceived = errors.New("not received")
 var ErrNotFound = errors.New("not found")
 
 const (
-	// One wait is capped at a minute, so it fits inside ordinary HTTP and
-	// proxy timeouts; agents call again to keep waiting.
+	// One wait is capped at 50 seconds, below the 60 second idle timeouts
+	// of common proxies such as nginx and AWS load balancers; agents call
+	// again to keep waiting.
 	defaultWait = 45 * time.Second
-	maxWait     = 60 * time.Second
+	maxWait     = 50 * time.Second
 )
 
 // New builds the MCP server over a backend.
@@ -60,14 +64,17 @@ func New(b Backend, version string) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_test_address",
 		Title:       "Get a test address",
-		Description: "Create a one-time email address. Send a preview of the newsletter issue to it from the email platform, then call wait_for_message with the token. The address accepts mail for 24 hours.",
+		Description: "Create a one-time email address. Send a preview of the newsletter issue to it from the email platform, then call wait_for_message with the token. The address accepts mail for 24 hours. To check a fixed version, send it to the same address and pass the earlier report_id to wait_for_message as after_report_id.",
 		Annotations: &mcp.ToolAnnotations{OpenWorldHint: ptr(false)},
 	}, t.getTestAddress)
 
 	mcp.AddTool(s, &mcp.Tool{
-		Name:        "wait_for_message",
-		Title:       "Wait for the test email",
-		Description: "Wait until the preview arrives at a test address, then return its verdict: verdict (pass, warn, or fail), ready_to_send, summary, top_fixes, and report_id. Returns status not_received if nothing arrived in time; call again to keep waiting.",
+		Name:  "wait_for_message",
+		Title: "Wait for the test email",
+		Description: "Wait until the preview arrives at a test address, then return its verdict: verdict (pass, warn, or fail), ready_to_send, summary, top_fixes, and report_id. " +
+			"Without after_report_id it returns the newest message at the address, even one that arrived before the call. " +
+			"When sending again to the same address (for example after a fix), pass the previous report_id as after_report_id so only a newer message counts. " +
+			"Waits up to 50 seconds per call. Returns status not_received if nothing arrived in time; call again to keep waiting.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(false)},
 	}, t.waitForMessage)
 
@@ -98,7 +105,8 @@ func (t *tools) getTestAddress(ctx context.Context, _ *mcp.CallToolRequest, _ em
 
 type waitIn struct {
 	Token          string `json:"token" jsonschema:"the token returned by get_test_address"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"how long to wait, up to 60 seconds (default 45)"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"how long to wait, up to 50 seconds (default 45)"`
+	AfterReportID  string `json:"after_report_id,omitempty" jsonschema:"a report_id from an earlier send to this address; only a message received after it is returned"`
 }
 
 // WaitOut is the short form of a verdict an agent acts on.
@@ -121,7 +129,7 @@ func (t *tools) waitForMessage(ctx context.Context, _ *mcp.CallToolRequest, in w
 	if in.TimeoutSeconds > 0 {
 		timeout = min(time.Duration(in.TimeoutSeconds)*time.Second, maxWait)
 	}
-	v, err := t.b.Wait(ctx, in.Token, timeout)
+	v, err := t.b.Wait(ctx, in.Token, in.AfterReportID, timeout)
 	if errors.Is(err, ErrNotReceived) {
 		return nil, WaitOut{Status: "not_received", Note: "Nothing has arrived yet. Check the preview was sent to the exact address, then call wait_for_message again."}, nil
 	}

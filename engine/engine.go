@@ -80,10 +80,12 @@ type run struct {
 	fp     verdict.Fingerprint
 
 	// Shared between checks.
-	dkim     []dkimResult
-	fromDom  string
-	spfDom   string
-	spfRes   verdict.Status
+	dkim    []dkimResult
+	fromDom string
+	spfDom  string
+	spfRes  verdict.Status
+	// spfTemp is set when SPF was skipped because DNS failed.
+	spfTemp  bool
 	parsed   *parsedHTML
 	dmarcRec *dmarcRecord
 	dmarcErr error
