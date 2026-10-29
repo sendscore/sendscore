@@ -88,7 +88,7 @@ func New(b Backend, version string) *mcp.Server {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "compare_to_previous",
 		Title:       "Compare with the previous issue",
-		Description: "List what changed between two reports, for example last week's issue and today's preview: signing domains, Return-Path, unsubscribe headers, link hosts, size, and authentication results. Changes that made a check worse are marked worsened.",
+		Description: "List what changed between two reports, for example two previews of the same issue, or the last issue and today's preview while both reports are kept (7 days): signing domains, Return-Path, unsubscribe headers, link hosts, size, and authentication results. Changes that made a check worse are marked worsened.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: ptr(false)},
 	}, t.compareToPrevious)
 	return s
