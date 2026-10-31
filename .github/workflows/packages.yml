@@ -8,16 +8,22 @@ on:
 
 permissions: {}
 
-env:
-  SENDSCORE_BIN: ${{ github.workspace }}/bin/sendscore
-
 jobs:
   typescript:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: [22]
+        include:
+          - os: ubuntu-latest
+            runtime: 20
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/sdk
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,19 +34,32 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.runtime }}
       - run: npm ci
       - run: npm test
 
   python:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['3.12']
+        include:
+          - os: ubuntu-latest
+            runtime: '3.10'
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/python
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,18 +70,31 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: 3.12
+          python-version: ${{ matrix.runtime }}
       - run: PYTHONPATH=src python -m unittest discover -s tests
 
   php:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['8.3']
+        include:
+          - os: ubuntu-latest
+            runtime: '8.1'
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/php
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,20 +105,33 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
-          php-version: 8.3
+          php-version: ${{ matrix.runtime }}
           coverage: none
       - run: composer install --no-interaction --no-progress
       - run: vendor/bin/phpunit
 
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: [stable]
+        include:
+          - os: ubuntu-latest
+            runtime: '1.88'
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/rust
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,15 +142,26 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
-      - run: cargo test --locked
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
+      - run: rustup toolchain install "${{ matrix.runtime }}" --profile minimal
+      - run: cargo "+${{ matrix.runtime }}" test --locked
 
   ruby:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['3.3']
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/ruby
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,18 +172,28 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@de492cf36cbab201753d720ce4f4e336cd688c94 # v1.336.0
         with:
-          ruby-version: '3.3'
+          ruby-version: ${{ matrix.runtime }}
       - run: for f in test/*_test.rb; do ruby -Ilib -Itest "$f"; done
 
   elixir:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['1.18']
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/elixir
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -138,19 +204,32 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        if: runner.os != 'macOS'
         with:
-          elixir-version: '1.18'
+          elixir-version: ${{ matrix.runtime }}
           otp-version: '27'
+      - if: runner.os == 'macOS'
+        run: brew install elixir
       - run: mix test
 
   java:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['17']
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/java
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -161,19 +240,29 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: ${{ matrix.runtime }}
       - run: mvn -B test
 
   dotnet:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        runtime: ['8.0.x']
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     defaults:
       run:
+        shell: bash
         working-directory: packages/dotnet
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -184,8 +273,12 @@ jobs:
           go-version-file: go.mod
       - name: Build the CLI
         working-directory: .
-        run: go build -o bin/sendscore .
+        run: |
+          exe=sendscore
+          if [ "$RUNNER_OS" = Windows ]; then exe=sendscore.exe; fi
+          go build -o "bin/$exe" .
+          echo "SENDSCORE_BIN=$GITHUB_WORKSPACE/bin/$exe" >> "$GITHUB_ENV"
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: ${{ matrix.runtime }}
       - run: dotnet test test/SendScore.Tests
