@@ -1,6 +1,7 @@
 module SendScore
   VERSION: String
   ENGINE_VERSION: String
+  KILLED: Integer
 
   type status = "pass" | "warn" | "fail" | "info" | "skipped"
 
@@ -15,11 +16,11 @@ module SendScore
     def initialize: (String message, Integer exit_code) -> void
   end
 
-  def self.check: (String | _ToS message, ?bytes: bool, ?offline: bool, ?links: bool, ?ip: String?, ?mail_from: String?, ?helo: String?, ?tls: bool?, ?previous: _ToS?) -> verdict
-  def self.diff: (_ToS before, _ToS after) -> diff_result
+  def self.check: (String | _ToS message, ?bytes: bool, ?offline: bool, ?links: bool, ?ip: String?, ?mail_from: String?, ?helo: String?, ?tls: bool?, ?previous: _ToS?, ?timeout: Numeric?) -> verdict
+  def self.diff: (_ToS before, _ToS after, ?timeout: Numeric?) -> diff_result
 
   module Binary
     def self.find: () -> String
-    def self.download: (String version, String base, String dir, ?[String, String] target) -> String
+    def self.download: (String version, String base, String dir, [String, String] pin, ?[String, String] target) -> String
   end
 end

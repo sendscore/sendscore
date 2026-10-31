@@ -2,9 +2,12 @@ require "digest"
 require "fileutils"
 require "net/http"
 require "rbconfig"
+require "openssl"
+require "pathname"
 require "rubygems/package"
+require "securerandom"
+require "sendscore/hashes"
 require "stringio"
-require "tempfile"
 require "uri"
 require "zlib"
 
@@ -13,10 +16,13 @@ module SendScore
   module Binary
     RELEASES = "https://github.com/sendscore/sendscore/releases/download".freeze
     MAX_REDIRECTS = 5
+    MAX_DOWNLOAD = 100 << 20
 
     module_function
 
-    # SENDSCORE_BIN, then PATH, then the cache, then a download.
+    # SENDSCORE_BIN, then the pinned version on PATH, then the cache, then a
+    # download. A cached binary is checked against its pinned hash every time,
+    # so a file planted in the cache is replaced and never run.
     def find
       from_env = ENV["SENDSCORE_BIN"]
       return from_env if from_env && !from_env.empty?
@@ -24,13 +30,43 @@ module SendScore
       name = windows? ? "sendscore.exe" : "sendscore"
       ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |dir|
         path = File.join(dir, name)
-        return path if !dir.empty? && File.file?(path) && File.executable?(path)
+        return path if absolute?(dir) && File.file?(path) && File.executable?(path) && right_version?(path)
       end
+      target = platform
+      pin = pin_for(target)
       dir = File.join(cache_root, "sendscore", ENGINE_VERSION)
       cached = File.join(dir, name)
-      return cached if File.executable?(cached)
+      return cached if matches_pin?(cached, pin)
 
-      download(ENGINE_VERSION, "#{RELEASES}/v#{ENGINE_VERSION}", dir)
+      download(ENGINE_VERSION, "#{RELEASES}/v#{ENGINE_VERSION}", dir, pin, target)
+    rescue SystemCallError => e
+      raise Error.new("could not find or install the CLI: #{e.message}", 0)
+    end
+
+    def absolute?(path)
+      !path.empty? && Pathname.new(path).absolute?
+    end
+
+    def right_version?(path)
+      code, stdout, = SendScore.capture(path, ["--version"], nil, 10)
+      code.zero? && stdout.split.last.to_s.sub(/\Av/, "") == ENGINE_VERSION
+    rescue Error, SystemCallError
+      false
+    end
+
+    # The [archive, binary] hashes of a platform. With none, nothing is trusted.
+    def pin_for(target, pins = HASHES)
+      key = target.join("_")
+      pins.fetch(key) do
+        raise Error.new("this package has no pinned hash for #{key}, so it will not download a CLI. Install the matching sendscore on PATH, or set SENDSCORE_BIN.", 0)
+      end
+    end
+
+    # Whether a file exists and is exactly the pinned binary.
+    def matches_pin?(path, pin)
+      File.file?(path) && Digest::SHA256.file(path).hexdigest == pin[1]
+    rescue SystemCallError
+      false
     end
 
     def windows?
@@ -54,31 +90,36 @@ module SendScore
       case platform.first
       when "darwin" then File.join(home, "Library", "Caches")
       when "windows" then ENV["LOCALAPPDATA"] || File.join(home, "AppData", "Local")
-      else ENV["XDG_CACHE_HOME"] || File.join(home, ".cache")
+      else
+        xdg = ENV["XDG_CACHE_HOME"].to_s
+        absolute?(xdg) ? xdg : File.join(home, ".cache")
       end
     end
 
     def fetch(url, redirects = MAX_REDIRECTS)
-      res = Net::HTTP.get_response(URI(url))
-      case res
-      when Net::HTTPSuccess then res.body
-      when Net::HTTPRedirection
-        raise Error.new("too many redirects from #{url}", 0) if redirects.zero?
+      uri = URI(url)
+      options = { use_ssl: uri.scheme == "https", open_timeout: 30, read_timeout: 60 }
+      Net::HTTP.start(uri.host, uri.port, options) do |http|
+        http.request_get(uri) do |res|
+          case res
+          when Net::HTTPSuccess
+            body = String.new(encoding: Encoding::BINARY)
+            res.read_body do |part|
+              body << part
+              raise Error.new("download of #{url} is too large", 0) if body.bytesize > MAX_DOWNLOAD
+            end
+            return body
+          when Net::HTTPRedirection
+            raise Error.new("too many redirects from #{url}", 0) if redirects.zero?
 
-        fetch(URI.join(url, res["location"]).to_s, redirects - 1)
-      else
-        raise Error.new("download of #{url} answered #{res.code}", 0)
+            return fetch(URI.join(url, res["location"]).to_s, redirects - 1)
+          else
+            raise Error.new("download of #{url} answered #{res.code}", 0)
+          end
+        end
       end
-    rescue SystemCallError, SocketError, IOError => e
+    rescue SystemCallError, SocketError, IOError, Timeout::Error, OpenSSL::SSL::SSLError, EOFError => e
       raise Error.new("download of #{url} failed: #{e.message}", 0)
-    end
-
-    def expected_hash(checksums, name)
-      checksums.each_line do |line|
-        hash, file = line.split
-        return hash.downcase if file == name
-      end
-      raise Error.new("checksums.txt does not list #{name}", 0)
     end
 
     # One file, by its exact name, so no path in the archive is ever used.
@@ -113,16 +154,15 @@ module SendScore
     end
 
     # Downloads a release into dir, and returns the binary's path. The archive
-    # is checked against checksums.txt before anything is extracted, so a
-    # binary that does not match never reaches the disk.
-    def download(version, base, dir, target = platform)
+    # must match its pin before anything is extracted, and the binary must
+    # match its pin before it reaches the disk.
+    def download(version, base, dir, pin, target = platform)
       os, arch = target
       exe = os == "windows" ? "sendscore.exe" : "sendscore"
       ext = os == "windows" ? "zip" : "tar.gz"
       name = "sendscore_#{version}_#{os}_#{arch}.#{ext}"
-      checksums = fetch("#{base}/checksums.txt")
       archive = fetch("#{base}/#{name}")
-      raise Error.new("#{name} does not match checksums.txt", 0) if Digest::SHA256.hexdigest(archive) != expected_hash(checksums, name)
+      raise Error.new("#{name} does not match its pinned hash", 0) if Digest::SHA256.hexdigest(archive) != pin[0]
 
       begin
         binary = os == "windows" ? from_zip(archive, exe) : from_tar(archive, exe)
@@ -130,10 +170,16 @@ module SendScore
         raise Error.new("could not read #{name}: #{e.message}", 0)
       end
       raise Error.new("#{name} has no #{exe}", 0) unless binary
+      raise Error.new("the binary in #{name} does not match its pinned hash", 0) if Digest::SHA256.hexdigest(binary) != pin[1]
 
+      install(binary, dir, exe)
+    end
+
+    def install(binary, dir, exe)
       FileUtils.mkdir_p(dir)
       path = File.join(dir, exe)
-      temp = "#{path}.#{Process.pid}.download"
+      # Unique per call, so threads and processes never share a partial file.
+      temp = "#{path}.#{Process.pid}.#{SecureRandom.hex(8)}.download"
       begin
         File.binwrite(temp, binary)
         File.chmod(0o755, temp)
@@ -142,6 +188,8 @@ module SendScore
         FileUtils.rm_f(temp)
       end
       path
+    rescue SystemCallError => e
+      raise Error.new("could not write to #{dir}: #{e.message}", 0)
     end
   end
 end
