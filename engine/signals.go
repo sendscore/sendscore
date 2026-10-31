@@ -346,6 +346,11 @@ func (r *run) checkActiveContent() {
 	for _, a := range r.msg.Attachments {
 		found = append(found, "attachment "+a)
 	}
+	// Attachment names are text from the message, so the title only counts them.
+	shown := append([]string{}, r.parsed.Active...)
+	if n := len(r.msg.Attachments); n > 0 {
+		shown = append(shown, plural(n, "attachment"))
+	}
 	ev := map[string]any{}
 	capped(ev, "found", found)
 	if len(found) > maxEvidenceItems {
@@ -355,10 +360,14 @@ func (r *run) checkActiveContent() {
 		r.add(verdict.Check{ID: "content.active", Category: verdict.Content, Status: verdict.Pass, Title: "No scripts, forms, embeds, or attachments"})
 		return
 	}
+	detail := "Mail clients strip scripts, forms, and embeds, and filters are wary of them and of attachments in bulk mail."
+	if n := len(r.msg.Attachments); n > 0 {
+		detail += " Attachments: " + strings.Join(r.msg.Attachments[:min(n, maxEvidenceItems)], ", ") + "."
+	}
 	r.add(verdict.Check{
 		ID: "content.active", Category: verdict.Content, Status: verdict.Warn,
-		Title:    "Contains " + joinAnd(found),
-		Detail:   "Mail clients strip scripts, forms, and embeds, and filters are wary of them and of attachments in bulk mail.",
+		Title:    "Contains " + joinAnd(shown),
+		Detail:   detail,
 		Evidence: ev,
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Link to a web page for anything interactive, and link to files instead of attaching them."},
 	})

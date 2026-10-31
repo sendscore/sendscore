@@ -646,7 +646,10 @@ scan:
 	}
 	r.add(verdict.Check{
 		ID: "content.placeholders", Category: verdict.Content, Status: verdict.Fail,
-		Title:    "Unrendered merge tags: " + strings.Join(found, ", "),
+		// The tags are text from the message, so they stay out of the title,
+		// which reaches the summary and an agent reading it.
+		Title:    fmt.Sprintf("Unrendered merge tags (%d)", total),
+		Detail:   "Found " + strings.Join(found, ", "),
 		Evidence: ev,
 		Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Check the spelling of these tags and that every subscriber has a value or a default."},
 	})

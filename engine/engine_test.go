@@ -516,8 +516,8 @@ func TestAttachmentsAreRecorded(t *testing.T) {
 	raw = bytes.Replace(raw, []byte("--b1--"), []byte("--b1\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"issue.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n--b1--"), 1)
 	v := analyze(t, raw, Options{Resolver: OfflineResolver{}})
 	c := find(t, v, "content.active")
-	if c.Status != verdict.Warn || !strings.Contains(c.Title, "issue.pdf") {
-		t.Errorf("active = %s %s", c.Status, c.Title)
+	if c.Status != verdict.Warn || !strings.Contains(c.Detail, "issue.pdf") || strings.Contains(c.Title, "issue.pdf") {
+		t.Errorf("active = %s %q %q", c.Status, c.Title, c.Detail)
 	}
 }
 

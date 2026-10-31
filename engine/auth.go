@@ -386,7 +386,11 @@ func (r *run) checkSPF() {
 	sender := r.spfSender()
 	r.spfDom = addrDomain(sender)
 	if r.spfDom == "" {
-		r.spfDom = strings.ToLower(r.opts.Envelope.Helo)
+		// A HELO name is whatever the sender typed, and it reaches titles
+		// and fixes through spfDom, so it has to be a host name.
+		if h, ok := dnsName(r.opts.Envelope.Helo); ok {
+			r.spfDom = h
+		}
 	}
 	r.fp.ReturnPathDomain = r.spfDom
 
