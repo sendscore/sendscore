@@ -82,11 +82,15 @@ const (
 )
 
 // authUnchecked names auth.dmarc or auth.dkim when it was skipped, or
+// unsub.signed when the signature that decides it could not be verified, or
 // returns "".
 func authUnchecked(checks []verdict.Check) string {
-	for _, id := range []string{"auth.dmarc", "auth.dkim"} {
+	for _, id := range []string{"auth.dmarc", "auth.dkim", "unsub.signed"} {
 		for _, c := range checks {
-			if c.ID == id && c.Status == verdict.Skipped {
+			if c.ID != id || c.Status != verdict.Skipped {
+				continue
+			}
+			if id != "unsub.signed" || c.Evidence["unverified_signature"] != nil {
 				return id
 			}
 		}

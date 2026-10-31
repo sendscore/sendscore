@@ -196,7 +196,9 @@ func (r *run) checkUnsubSigned(hasHeader, hasPost bool) {
 	// A signature that could not be verified may be the one that covers them.
 	for _, d := range r.dkim {
 		if d.Result == "temperror" || d.ExpiredAfterReceipt {
-			r.add(skipped("unsub.signed", verdict.Unsub, "Unsubscribe signing not checked", "A DKIM signature that might cover the unsubscribe headers could not be verified."))
+			c := skipped("unsub.signed", verdict.Unsub, "Unsubscribe signing not checked", "A DKIM signature that might cover the unsubscribe headers could not be verified.")
+			c.Evidence = map[string]any{"unverified_signature": d.Domain}
+			r.add(c)
 			return
 		}
 	}
