@@ -8,6 +8,13 @@ import (
 	"testing"
 )
 
+// generated names directories of tools' output and installed dependencies,
+// here and in packages/.
+var generated = map[string]bool{
+	".git": true, "bin": true, "dist": true, "node_modules": true, "target": true, "vendor": true,
+	"_build": true, "deps": true, "obj": true, "__pycache__": true, ".venv": true, ".pytest_cache": true,
+}
+
 // TestNoDashes keeps em and en dashes out of every file in the repository.
 func TestNoDashes(t *testing.T) {
 	banned := []string{"\u2014", "\u2013"}
@@ -16,7 +23,7 @@ func TestNoDashes(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if name := d.Name(); name == ".git" || name == "bin" || name == "dist" {
+			if generated[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil

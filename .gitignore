@@ -4,3 +4,16 @@ coverage.out
 coverage.html
 .DS_Store
 dist/
+node_modules/
+target/
+vendor/
+_build/
+deps/
+obj/
+__pycache__/
+.venv/
+*.egg-info/
+*.gem
+Gemfile.lock
+composer.lock
+erl_crash.dump

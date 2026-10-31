@@ -1,0 +1,25 @@
+Return-Path: <bounce@mail.example.com>
+From: Daily Tips <tips@example.com>
+To: test@in.example.net
+Subject: After the move
+Date: Wed, 28 Oct 2026 13:12:04 +0000
+Message-ID: <after@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+Today we shoot into the sun.
+Unsubscribe: https://example.com/unsubscribe?u=1
+
+--b1
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<p><a href="https://new.example.org/x">New host</a></p>
+<p><a href="https://example.com/posts/sun">Read the full tip</a></p>
+<p><a href="https://example.com/unsubscribe?u=1">Unsubscribe</a></p>
+</body></html>
+
+--b1--
