@@ -191,3 +191,16 @@ func TestMCPNeedsAppURL(t *testing.T) {
 		t.Errorf("exit code = %d, want %d", code, ExitUsage)
 	}
 }
+
+func TestHostileDateDoesNotBreakJSON(t *testing.T) {
+	for _, date := range []string{"Sat, 1 Jan 0000 00:00:00 +0100", "Fri, 31 Dec 9999 23:59:59 -0100"} {
+		path := filepath.Join(t.TempDir(), "m.eml")
+		raw := "From: a@example.com\r\nDate: " + date + "\r\nSubject: x\r\n\r\nhi\r\n"
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if out, code := run(t, "check", "--offline", "--json", path); code == ExitIOErr {
+			t.Errorf("%s: exit %d: %s", date, code, out)
+		}
+	}
+}

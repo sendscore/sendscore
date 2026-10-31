@@ -107,5 +107,9 @@ func dateHeader(raw []byte) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
+	// JSON can hold only these years, and a time zone can move a date out.
+	if y := d.UTC().Year(); y < 1 || y > 9999 {
+		return time.Time{}
+	}
 	return d
 }
