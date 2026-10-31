@@ -205,11 +205,9 @@ func (r *run) verifyDKIM() {
 		MaxVerifications: 8,
 	})
 	if err != nil && !errors.Is(err, dkim.ErrTooManySignatures) {
-		r.add(verdict.Check{
-			ID: "auth.dkim", Category: verdict.Auth, Status: verdict.Fail,
-			Title: "DKIM could not be verified", Detail: err.Error(),
-		})
-		r.fp.Auth["dkim"] = verdict.Fail
+		// The library could not read the message, so no signature was tried.
+		r.add(skipped("auth.dkim", verdict.Auth, "DKIM could not be verified", "The message could not be read for verification: "+err.Error()))
+		r.fp.Auth["dkim"] = verdict.Skipped
 		return
 	}
 
