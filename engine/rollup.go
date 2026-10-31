@@ -14,8 +14,9 @@ var defaultBlocking = []verdict.Category{verdict.Auth, verdict.Unsub}
 
 // rollUp sets the overall verdict, ready_to_send, the top fixes, and the
 // summary from the individual checks. dnsFailed says a DNS failure hid an
-// authentication result, so running the check again may help.
-func rollUp(v *verdict.Verdict, blocking []verdict.Category, dnsFailed bool) {
+// authentication result, so running the check again may help. stopped says
+// the analysis was canceled or ran out of time, so some checks did not run.
+func rollUp(v *verdict.Verdict, blocking []verdict.Category, dnsFailed, stopped bool) {
 	if blocking == nil {
 		blocking = defaultBlocking
 	}
@@ -40,13 +41,13 @@ func rollUp(v *verdict.Verdict, blocking []verdict.Category, dnsFailed bool) {
 		uncheckedID = authUnchecked(v.Checks)
 	}
 	unchecked := uncheckedID != ""
-	if unchecked {
+	if unchecked || stopped {
 		v.ReadyToSend = false
 	}
 	switch {
 	case fails > 0:
 		v.Verdict = verdict.Fail
-	case warns > 0 || unchecked:
+	case warns > 0 || unchecked || stopped:
 		v.Verdict = verdict.Warn
 	default:
 		v.Verdict = verdict.Pass
@@ -68,9 +69,13 @@ func rollUp(v *verdict.Verdict, blocking []verdict.Category, dnsFailed bool) {
 		}
 		v.Summary = strings.TrimSpace(lead + " " + strings.TrimPrefix(v.Summary, "Every check that ran passed."))
 	}
+	if stopped {
+		v.Summary = strings.TrimSpace(stoppedSummary + " " + strings.TrimPrefix(v.Summary, "Every check that ran passed."))
+	}
 }
 
 const (
+	stoppedSummary        = "The check was stopped before it finished, so this is not ready to send."
 	authUncheckedSummary  = "Authentication could not be checked because DNS lookups failed, so this is not ready to send."
 	authIncompleteSummary = "Authentication could not be fully checked, so this is not ready to send."
 	retryAuthFix          = "Run the check again once DNS lookups work. Some authentication results could not be evaluated, which does not mean they are wrong."

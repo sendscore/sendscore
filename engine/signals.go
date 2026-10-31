@@ -586,7 +586,7 @@ func (r *run) queryBlocklist(ctx context.Context, bl Blocklist, domain string) b
 // lookupA asks for IPv4 addresses only, which is all a blocklist answers
 // with, when the resolver supports it.
 func (r *run) lookupA(ctx context.Context, host string) ([]net.IP, error) {
-	if ip4, ok := r.res.(interface {
+	if ip4, ok := r.opts.Resolver.(interface {
 		LookupIP(context.Context, string, string) ([]net.IP, error)
 	}); ok {
 		return ip4.LookupIP(ctx, "ip4", host)

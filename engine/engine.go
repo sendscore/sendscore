@@ -91,6 +91,43 @@ type run struct {
 	parsed   *parsedHTML
 	dmarcRec *dmarcRecord
 	dmarcErr error
+	// multiFrom is set when the message has more than one From address.
+	multiFrom bool
+}
+
+// A hostile name server can stall each of the many lookups authentication
+// makes, so each has a timeout and all of them together have a deadline. They
+// are variables so tests need not wait.
+var (
+	lookupTimeout = 5 * time.Second
+	authDeadline  = 20 * time.Second
+)
+
+// timedResolver gives each lookup its own timeout.
+type timedResolver struct{ Resolver }
+
+func (t timedResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	return t.Resolver.LookupTXT(ctx, name)
+}
+
+func (t timedResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	return t.Resolver.LookupMX(ctx, name)
+}
+
+func (t timedResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	return t.Resolver.LookupIPAddr(ctx, host)
+}
+
+func (t timedResolver) LookupAddr(ctx context.Context, addr string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	return t.Resolver.LookupAddr(ctx, addr)
 }
 
 // Analyze checks one raw RFC 5322 message.
@@ -105,12 +142,17 @@ func Analyze(ctx context.Context, raw []byte, opts Options) (*verdict.Verdict, e
 	if opts.ReceivedAt.IsZero() {
 		opts.ReceivedAt = time.Now().UTC()
 	}
-	r := &run{ctx: ctx, opts: opts, res: opts.Resolver, msg: msg}
+	r := &run{ctx: ctx, opts: opts, res: timedResolver{opts.Resolver}, msg: msg}
 	r.fp.Auth = map[string]verdict.Status{}
 	r.fromDom = addrDomain(msg.Header.Get("From"))
+	r.multiFrom = msg.fromCount() > 1
 
 	r.structure()
+	authCtx, cancelAuth := context.WithTimeout(ctx, authDeadline)
+	r.ctx = authCtx
 	r.auth()
+	r.ctx = ctx
+	cancelAuth()
 	r.unsubscribe()
 	r.content()
 
@@ -134,7 +176,7 @@ func Analyze(ctx context.Context, raw []byte, opts Options) (*verdict.Verdict, e
 			v.Checks = append(v.Checks, c)
 		}
 	}
-	rollUp(v, opts.Blocking, r.authDNS)
+	rollUp(v, opts.Blocking, r.authDNS, ctx.Err() != nil)
 	return v, nil
 }
 

@@ -72,6 +72,47 @@ type dmarcRecord struct {
 	Rec    *dmarc.Record
 	// Records lists every record when there is more than one.
 	Records []string
+	// ParseErr is set when the record has a syntax error but its policy
+	// could still be read, as RFC 7489 section 6.3 tells receivers to do.
+	ParseErr error
+}
+
+// tolerantDMARC reads the tags that decide the outcome from a record that
+// does not parse, and leaves the rest at their defaults. It returns nil when
+// the policy itself is unusable.
+func tolerantDMARC(raw string) *dmarc.Record {
+	rec := &dmarc.Record{DKIMAlignment: dmarc.AlignmentRelaxed, SPFAlignment: dmarc.AlignmentRelaxed}
+	policy := func(v string) dmarc.Policy {
+		switch p := dmarc.Policy(strings.ToLower(v)); p {
+		case dmarc.PolicyNone, dmarc.PolicyQuarantine, dmarc.PolicyReject:
+			return p
+		}
+		return ""
+	}
+	align := func(v string) dmarc.AlignmentMode {
+		if strings.EqualFold(v, "s") {
+			return dmarc.AlignmentStrict
+		}
+		return dmarc.AlignmentRelaxed
+	}
+	for _, part := range strings.Split(raw, ";") {
+		k, v, _ := strings.Cut(part, "=")
+		v = strings.TrimSpace(v)
+		switch strings.ToLower(strings.TrimSpace(k)) {
+		case "p":
+			rec.Policy = policy(v)
+		case "sp":
+			rec.SubdomainPolicy = policy(v)
+		case "adkim":
+			rec.DKIMAlignment = align(v)
+		case "aspf":
+			rec.SPFAlignment = align(v)
+		}
+	}
+	if rec.Policy == "" {
+		return nil
+	}
+	return rec
 }
 
 func (r *run) auth() {
@@ -243,6 +284,10 @@ func (r *run) verifyDKIM() {
 			r.authDNS = true
 		}
 		c = skipped("auth.dkim", verdict.Auth, "DKIM not verified", reason)
+	case offline+temp+expired > 0:
+		// One of the signatures that could not be verified may be good.
+		c = skipped("auth.dkim", verdict.Auth, "DKIM not verified", "One signature does not verify, and another could not be verified, so whether DKIM passes is unknown.")
+		r.authDNS = offline+temp > 0
 	default:
 		c.Status, c.Title = verdict.Fail, "No DKIM signature verifies"
 		c.Detail = "The message is signed, but no signature checks out against the published key."
@@ -347,6 +392,11 @@ func (r *run) checkSPF() {
 		return
 	}
 	r.fp.RemoteIP = ip.String()
+	if r.spfDom == "" {
+		r.add(skipped("auth.spf", verdict.Auth, "SPF not checked", "There is no envelope sender, Return-Path, or HELO name to check SPF for."))
+		r.spfRes = verdict.Skipped
+		return
+	}
 
 	res, err := spf.CheckHostWithSender(ip, r.opts.Envelope.Helo, sender,
 		spf.WithResolver(r.res), spf.WithContext(r.ctx))
@@ -702,6 +752,9 @@ func (r *run) lookupDMARC() (*dmarcRecord, error) {
 		}
 		rec, err := dmarc.Parse(recs[0])
 		if err != nil {
+			if t := tolerantDMARC(recs[0]); t != nil {
+				return &dmarcRecord{Domain: d, Raw: recs[0], Rec: t, ParseErr: err}, nil
+			}
 			return &dmarcRecord{Domain: d, Raw: recs[0]}, err
 		}
 		return &dmarcRecord{Domain: d, Raw: recs[0], Rec: rec}, nil
@@ -761,7 +814,12 @@ func (r *run) checkDMARCRecord() {
 	default:
 		p, tag := rec.policy(r.fromDom)
 		c.Evidence = map[string]any{"domain": rec.Domain, "record": rec.Raw, "policy": string(p), "policy_tag": tag}
-		if p == dmarc.PolicyNone && len(rec.Rec.ReportURIAggregate) == 0 {
+		if rec.ParseErr != nil {
+			c.Status, c.Title = verdict.Warn, "DMARC record has a syntax error, but its policy is "+string(p)
+			c.Detail = "Receivers are told to ignore what they cannot read and apply the policy, but not all of them do."
+			c.Evidence["error"] = rec.ParseErr.Error()
+			c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Fix the syntax of the DMARC record at _dmarc." + rec.Domain + "."}
+		} else if p == dmarc.PolicyNone && len(rec.Rec.ReportURIAggregate) == 0 {
 			c.Status, c.Title = verdict.Warn, "DMARC policy is none, with no reports"
 			c.Detail = "A policy of none meets the bulk sender rules, but without rua you never see who is sending as your domain."
 			c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Add rua=mailto:... to the DMARC record so you receive aggregate reports."}
@@ -822,6 +880,10 @@ func (r *run) alignment() authAlignment {
 		// SPF could have passed DMARC when it was delivered.
 		a.hidden("SPF was not checked because there is no envelope, and the Return-Path domain " + r.spfDom + " aligns with the From domain.")
 	}
+	if r.spfRes == verdict.Skipped && r.spfDom == "" {
+		// Whether SPF could have aligned is unknown without a domain to test.
+		a.hidden("SPF was not checked because the message has no Return-Path.")
+	}
 	if r.fp.Auth["dkim"] == verdict.Skipped && r.spfRes == verdict.Skipped {
 		a.hidden("Neither DKIM nor SPF could be checked.")
 	}
@@ -848,6 +910,8 @@ func (r *run) checkDMARC() {
 	switch {
 	case errors.Is(r.dmarcErr, errNoFromDomain):
 		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The message has no From domain to check DMARC for.")
+	case r.multiFrom:
+		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The message has more than one From address, and DMARC needs exactly one. See struct.headers.")
 	case r.dmarcUnknown() != "":
 		c = skipped("auth.dmarc", verdict.Auth, "DMARC not evaluated", "The DMARC record could not be read. "+r.dmarcUnknown())
 	case !hasPolicy:
