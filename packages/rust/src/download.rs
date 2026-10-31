@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// The CLI release this crate downloads when none is installed.
-pub const ENGINE_VERSION: &str = "0.2.0";
+pub const ENGINE_VERSION: &str = "0.3.0";
 const RELEASES: &str = "https://github.com/sendscore/sendscore/releases/download";
 const MAX_DOWNLOAD: u64 = 100 << 20;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);

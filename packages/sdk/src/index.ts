@@ -9,7 +9,7 @@ export * from "./types.js";
 export { KILLED, SendScoreError } from "./error.js";
 
 /** The CLI release this package downloads when none is installed. */
-export const ENGINE_VERSION = "0.2.0";
+export const ENGINE_VERSION = "0.3.0";
 
 const exe = process.platform === "win32" ? "sendscore.exe" : "sendscore";
 const VERSION_TIMEOUT_MS = 10_000;

@@ -1,6 +1,6 @@
 {
   "name": "sendscore",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI.",
   "license": "MIT",
   "type": "module",

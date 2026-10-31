@@ -10,7 +10,7 @@ namespace SendScore;
 public static class Binary
 {
     /// <summary>The CLI release this package downloads when none is installed.</summary>
-    public const string EngineVersion = "0.2.0";
+    public const string EngineVersion = "0.3.0";
 
     private const string Releases = "https://github.com/sendscore/sendscore/releases/download";
     private const long MaxDownload = 100 << 20;

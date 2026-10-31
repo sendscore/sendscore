@@ -7,7 +7,7 @@ namespace SendScore;
 /** Finds the CLI, and downloads a release when none is installed. */
 final class Binary
 {
-    public const ENGINE_VERSION = '0.2.0';
+    public const ENGINE_VERSION = '0.3.0';
     public const RELEASES = 'https://github.com/sendscore/sendscore/releases/download';
 
     private const MAX_DOWNLOAD = 100 << 20;
