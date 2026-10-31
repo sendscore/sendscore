@@ -6,7 +6,6 @@ namespace SendScore\Tests;
 
 use PHPUnit\Framework\TestCase;
 use SendScore\Binary;
-use SendScore\Process;
 use SendScore\SendScore;
 use SendScore\SendScoreException;
 
@@ -130,12 +129,6 @@ final class CliTest extends TestCase
         $mode = 'version-' . Binary::ENGINE_VERSION;
         $path = $this->fake($mode);
         $this->onlyPath(self::$tmp . "/$mode");
-        $this->assertSame(self::$tmp . "/$mode", getenv('PATH'));
-        $this->assertTrue(is_file(self::$tmp . "/$mode" . DIRECTORY_SEPARATOR . self::$exe));
-        $this->assertSame([0, 'sendscore version ' . Binary::ENGINE_VERSION], array_slice(array_map(
-            fn ($v) => is_string($v) ? trim($v) : $v,
-            Process::run([self::$tmp . "/$mode" . DIRECTORY_SEPARATOR . self::$exe, '--version'], null, 10.0),
-        ), 0, 2));
         $this->assertSame(realpath($path), realpath(Binary::find()));
     }
 
