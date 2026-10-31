@@ -1,6 +1,6 @@
 // Package mcpserver defines SendScore's MCP tools. The same tools are served
-// two ways: by the hosted app as a remote connector (over its own database),
-// and by `sendscore mcp` on a laptop (over the hosted API, see HTTPBackend).
+// two ways: by the app as a remote connector (over its own database),
+// and by `sendscore mcp` on a laptop (over the app's API, see HTTPBackend).
 // Everything of substance lives here so the two never drift apart.
 package mcpserver
 

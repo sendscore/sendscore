@@ -184,3 +184,10 @@ func TestDiffIgnoresAuthentication(t *testing.T) {
 		t.Errorf("fingerprint lost what the message carries: %+v", fp)
 	}
 }
+
+func TestMCPNeedsAppURL(t *testing.T) {
+	t.Setenv("SENDSCORE_URL", "")
+	if _, code := run(t, "mcp"); code != ExitUsage {
+		t.Errorf("exit code = %d, want %d", code, ExitUsage)
+	}
+}

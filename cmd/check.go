@@ -15,7 +15,7 @@ import (
 	"github.com/sendscore/sendscore/verdict"
 )
 
-// maxMessageBytes matches what the hosted receiver accepts.
+// maxMessageBytes matches what the app's receiver accepts.
 const maxMessageBytes = 25 << 20
 
 type checkFlags struct {

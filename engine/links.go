@@ -398,7 +398,7 @@ func fetch(ctx context.Context, client *http.Client, u string) linkResult {
 			res.Error = err.Error()
 			return res
 		}
-		req.Header.Set("User-Agent", "SendScore link check (+https://sendscore.ai)")
+		req.Header.Set("User-Agent", "SendScore link check (+https://github.com/sendscore/sendscore)")
 		resp, err := client.Do(req)
 		if err != nil {
 			res.Error = err.Error()

@@ -1,5 +1,5 @@
 // Package verdict holds the report SendScore returns for one received
-// message. It is the JSON contract shared by the CLI, the hosted app, the API,
+// message. It is the JSON contract shared by the CLI, the app, the API,
 // and the MCP tools, so a field is never renamed or repurposed within a
 // schema version: add a field, or bump Schema.
 package verdict

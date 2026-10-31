@@ -1,6 +1,6 @@
 # AGENTS.md
 
-SendScore's engine and CLI (Go, MIT). The hosted app lives in sendscore/sendscore-app and imports `engine` and `verdict` from here.
+SendScore's engine and CLI (Go, MIT). The self-hosted app lives in sendscore/sendscore-app and imports `engine` and `verdict` from here.
 
 - `verdict/`: the JSON contract (`sendscore.verdict/v1`). Never rename or repurpose a field within a schema version: add a field, or bump `Schema`.
 - `engine/`: one file per category of checks (`auth.go`, `unsub.go`, `structure.go`, `content.go`, `links.go`), `compare.go` for issue to issue changes, and `rollup.go` for the overall verdict, ready_to_send, top fixes, and summary.

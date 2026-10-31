@@ -6,7 +6,9 @@ SendScore reads one received message and returns a verdict: SPF, DKIM, DMARC and
 
 It reports what the message proves. Receipt at SendScore is not inbox placement at Gmail or anyone else, and SendScore never claims it is.
 
-This repository is the engine and the command line. The hosted service at [sendscore.ai](https://sendscore.ai) adds test addresses, monitoring, a delivery heartbeat, history, alerts, an API, and MCP tools for agents, all built on this engine.
+This repository is the engine and the command line, which need no server or account. The [SendScore app](https://github.com/sendscore/sendscore-app) is a separate server you run yourself, built on this engine. It adds test addresses, monitoring, a delivery heartbeat, history, alerts, an API, and MCP tools for agents, and it needs a host that can receive mail on port 25.
+
+There is no hosted version right now. If you would use one, [open an issue](https://github.com/sendscore/sendscore/issues) and say so.
 
 ## Install
 
@@ -57,13 +59,13 @@ Exit codes:
 
 ## MCP
 
-`sendscore mcp` runs SendScore's MCP tools over stdio for Claude Code, Claude Desktop, or any MCP client:
+`sendscore mcp` runs SendScore's MCP tools over stdio for Claude Code, Claude Desktop, or any MCP client. It needs a running [SendScore app](https://github.com/sendscore/sendscore-app), so run your own first.
 
 ```sh
-claude mcp add sendscore --env SENDSCORE_TOKEN=ss_live_... -- sendscore mcp
+claude mcp add sendscore --env SENDSCORE_URL=https://sendscore.example.com --env SENDSCORE_TOKEN=ss_live_... -- sendscore mcp
 ```
 
-The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare_to_previous`. They call a SendScore app's API, which needs an API token on every request. Create one on the Account page of the app and set it as `SENDSCORE_TOKEN`. `SENDSCORE_URL` points at the app, and defaults to `https://app.sendscore.ai` (set it for your own instance). The hosted app also serves the same tools as a remote connector at `https://app.sendscore.ai/api/mcp`.
+The tools are `get_test_address`, `wait_for_message`, `get_report`, and `compare_to_previous`. They call a SendScore app's API, which needs an API token on every request. Create one on the Account page of the app and set it as `SENDSCORE_TOKEN`. `SENDSCORE_URL` is the address of your app, and is required. The app also serves the same tools as a remote connector at `/api/mcp`.
 
 An agent's loop: get a test address, send the issue's preview to it from the email platform, wait for the verdict, and fix what `top_fixes` lists before scheduling.
 

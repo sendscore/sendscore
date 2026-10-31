@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -10,31 +11,30 @@ import (
 	"github.com/sendscore/sendscore/mcpserver"
 )
 
-// defaultAppURL is the hosted app. A self-hosted instance sets SENDSCORE_URL.
-const defaultAppURL = "https://app.sendscore.ai"
-
 func newMCP() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
 		Short: "Run the SendScore MCP server over stdio",
 		Long: `Run SendScore's MCP tools over stdio, for Claude Code, Claude Desktop, or
-any other MCP client. The tools call a SendScore app's API, which needs an
-API token on every request. Create one on the Account page of the app.
+any other MCP client. The tools call the API of a SendScore app you run,
+which needs an API token on every request. Create one on the Account page
+of the app.
 
+  SENDSCORE_URL     the address of your app (required)
   SENDSCORE_TOKEN   your API token (required, starts with ss_live_)
-  SENDSCORE_URL     the app (default https://app.sendscore.ai)
 
 Tools: get_test_address, wait_for_message, get_report, and
 compare_to_previous.
 
 Example (Claude Code):
 
-  claude mcp add sendscore --env SENDSCORE_TOKEN=ss_live_... -- sendscore mcp`,
+  claude mcp add sendscore --env SENDSCORE_URL=https://sendscore.example.com \
+    --env SENDSCORE_TOKEN=ss_live_... -- sendscore mcp`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			base := os.Getenv("SENDSCORE_URL")
 			if base == "" {
-				base = defaultAppURL
+				return errors.New("SENDSCORE_URL is not set, so there is no SendScore app to call. Set it to the address of your app")
 			}
 			token := os.Getenv("SENDSCORE_TOKEN")
 			if token == "" {
