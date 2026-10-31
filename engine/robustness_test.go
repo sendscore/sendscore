@@ -81,7 +81,7 @@ func TestPlaceholderScanIsBounded(t *testing.T) {
 	for name, raw := range cases {
 		start := time.Now()
 		v := analyze(t, raw, Options{Resolver: OfflineResolver{}})
-		if d := time.Since(start); d > 5*time.Second {
+		if d := time.Since(start); d > 5*raceFactor*time.Second {
 			t.Errorf("%s took %v", name, d)
 		}
 		if c := checkOf(t, v, "content.placeholders"); c.Status != verdict.Fail {
@@ -109,7 +109,7 @@ func TestListUnsubscribeIsBounded(t *testing.T) {
 		"List-Unsubscribe: "+strings.Repeat("<http://a/b>,", 80000), 1))
 	start := time.Now()
 	v := analyze(t, raw, Options{Resolver: OfflineResolver{}, CheckLinks: true, HTTPClient: &http.Client{Transport: &recordingClient{}}})
-	if d := time.Since(start); d > 5*time.Second {
+	if d := time.Since(start); d > 5*raceFactor*time.Second {
 		t.Errorf("took %v", d)
 	}
 	if c := checkOf(t, v, "unsub.header"); c.Status == verdict.Pass {

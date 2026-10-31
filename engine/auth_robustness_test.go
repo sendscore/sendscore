@@ -157,7 +157,7 @@ func TestStalledDNSCannotHoldTheAnalysis(t *testing.T) {
 	defer func() { lookupTimeout, authDeadline = l, a }()
 	start := time.Now()
 	v := analyze(t, buildMessage(t, msgOpts{sign: true}), Options{Resolver: stallDNS{goodDNS()}, Envelope: envelope()})
-	if d := time.Since(start); d > 5*time.Second {
+	if d := time.Since(start); d > 5*raceFactor*time.Second {
 		t.Errorf("took %v", d)
 	}
 	if c := checkOf(t, v, "auth.dmarc"); c.Status == verdict.Pass || c.Status == verdict.Fail {
