@@ -15,7 +15,7 @@ class ConformanceTest < Minitest::Test
 
     given = c.fetch("options", {})
     opts = { offline: true }
-    %w[ip mail_from helo tls].each { |k| opts[k.to_sym] = given[k] if given.key?(k) }
+    %w[links ip mail_from helo tls].each { |k| opts[k.to_sym] = given[k] if given.key?(k) }
     opts[:previous] = path(given["previous"]) if given.key?("previous")
     return SendScore.check(File.binread(path(c["message"])), bytes: true, **opts) if c["via"] == "stdin"
 

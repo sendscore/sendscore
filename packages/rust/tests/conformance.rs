@@ -54,6 +54,7 @@ fn conformance() {
         let given = c.get("options").cloned().unwrap_or(Value::Null);
         let opts = CheckOptions {
             offline: true,
+            links: given.get("links").and_then(Value::as_bool).unwrap_or(false),
             ip: text(&given, "ip"),
             mail_from: text(&given, "mail_from"),
             helo: text(&given, "helo"),

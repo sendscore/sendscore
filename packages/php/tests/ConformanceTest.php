@@ -30,7 +30,7 @@ final class ConformanceTest extends TestCase
         }
         $given = $c['options'] ?? [];
         $options = ['offline' => true];
-        foreach (['ip' => 'ip', 'helo' => 'helo', 'tls' => 'tls', 'mail_from' => 'mailFrom'] as $from => $to) {
+        foreach (['links' => 'links', 'ip' => 'ip', 'helo' => 'helo', 'tls' => 'tls', 'mail_from' => 'mailFrom'] as $from => $to) {
             if (array_key_exists($from, $given)) {
                 $options[$to] = $given[$from];
             }

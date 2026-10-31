@@ -30,6 +30,9 @@ class ConformanceTest {
   private static CheckOptions options(JsonNode c) {
     JsonNode given = c.path("options");
     CheckOptions o = new CheckOptions().offline(true);
+    if (given.has("links")) {
+      o.links(given.get("links").asBoolean());
+    }
     if (given.has("ip")) {
       o.ip(given.get("ip").asText());
     }

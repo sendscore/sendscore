@@ -38,6 +38,7 @@ public class ConformanceTests
         {
             return o;
         }
+        if (given.TryGetProperty("links", out var links)) o = o with { Links = links.GetBoolean() };
         if (given.TryGetProperty("ip", out var ip)) o = o with { Ip = ip.GetString() };
         if (given.TryGetProperty("mail_from", out var from)) o = o with { MailFrom = from.GetString() };
         if (given.TryGetProperty("helo", out var helo)) o = o with { Helo = helo.GetString() };

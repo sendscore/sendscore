@@ -10,7 +10,7 @@ defmodule SendScore.ConformanceTest do
 
   defp run(c) do
     given = Map.get(c, "options", %{})
-    opts = for k <- ~w(ip mail_from helo tls), Map.has_key?(given, k), do: {String.to_atom(k), given[k]}
+    opts = for k <- ~w(links ip mail_from helo tls), Map.has_key?(given, k), do: {String.to_atom(k), given[k]}
     opts = if given["previous"], do: [{:previous, path(given["previous"])} | opts], else: opts
     message = if c["via"] == "stdin", do: {:bytes, File.read!(path(c["message"]))}, else: path(c["message"])
     SendScore.check(message, [{:offline, true} | opts])

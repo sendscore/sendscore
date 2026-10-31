@@ -50,6 +50,9 @@ func runConformance(t *testing.T, bin string, c conformanceCase) conformanceCase
 				args = append(args, o.flag, v)
 			}
 		}
+		if links, _ := c.Options["links"].(bool); links {
+			args = append(args, "--links")
+		}
 		if tls, ok := c.Options["tls"].(bool); ok {
 			args = append(args, "--tls", map[bool]string{true: "yes", false: "no"}[tls])
 		}

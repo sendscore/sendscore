@@ -11,6 +11,7 @@ const p = (rel) => root + rel;
 function options(c) {
   const o = { offline: true };
   const given = c.options ?? {};
+  if (given.links !== undefined) o.links = given.links;
   if (given.ip !== undefined) o.ip = given.ip;
   if (given.mail_from !== undefined) o.mailFrom = given.mail_from;
   if (given.helo !== undefined) o.helo = given.helo;

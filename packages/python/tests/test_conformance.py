@@ -12,7 +12,7 @@ def run(c):
     if c["command"] == "diff":
         return diff(ROOT / c["before"], ROOT / c["after"])
     given = c.get("options", {})
-    opts = {k: given[k] for k in ("ip", "mail_from", "helo", "tls") if k in given}
+    opts = {k: given[k] for k in ("links", "ip", "mail_from", "helo", "tls") if k in given}
     if "previous" in given:
         opts["previous"] = ROOT / given["previous"]
     path = ROOT / c["message"]
