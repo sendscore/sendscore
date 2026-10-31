@@ -20,6 +20,7 @@ import (
 // within fails the test when f takes longer than d.
 func within(t *testing.T, d time.Duration, f func()) {
 	t.Helper()
+	d *= raceFactor
 	start := time.Now()
 	f()
 	if took := time.Since(start); took > d {
