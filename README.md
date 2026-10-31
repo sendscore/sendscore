@@ -8,7 +8,7 @@ It reports what the message proves. Receipt at SendScore is not inbox placement 
 
 This repository is the engine and the command line, which need no server or account. The [SendScore app](https://github.com/sendscore/sendscore-app) is a separate server you run yourself, built on this engine. It adds test addresses, monitoring, a delivery heartbeat, history, alerts, an API, and MCP tools for agents, and it needs a host that can receive mail on port 25.
 
-There is no hosted version right now. If you would use one, [open an issue](https://github.com/sendscore/sendscore/issues) and say so.
+There is no hosted version right now. If you would use one, [say so on this issue](https://github.com/sendscore/sendscore/issues/1).
 
 ## Install
 
