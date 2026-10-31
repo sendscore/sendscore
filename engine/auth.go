@@ -404,7 +404,7 @@ func (r *run) checkSPF() {
 		ID: "auth.spf", Category: verdict.Auth, Docs: docsSPF,
 		Evidence: map[string]any{"result": string(res), "ip": ip.String(), "domain": r.spfDom},
 	}
-	if err != nil {
+	if err != nil && res != spf.Pass {
 		c.Evidence["error"] = err.Error()
 	}
 	who := verdict.FixedByProvider
@@ -497,11 +497,16 @@ func (r *run) checkSPFLookups() {
 	if len(w.voids) > 0 {
 		c.Evidence["void_names"] = w.voids
 	}
-	const permerror = "Receivers treat this as a permanent SPF error, so SPF fails for every message."
+	status, permerror := verdict.Fail, "Receivers treat this as a permanent SPF error, so SPF fails for every message."
+	if r.spfRes == verdict.Pass {
+		// A receiver stops at the first term that matches, so this message
+		// never got as far as the error.
+		status, permerror = verdict.Warn, "This message passed because a term before the error matched. Receivers treat the error as a permanent SPF error for mail that reaches this term."
+	}
 	switch {
 	case w.problem != nil:
 		p := w.problem
-		c.Status, c.Detail = verdict.Fail, permerror
+		c.Status, c.Detail = status, permerror
 		c.Evidence["problem"], c.Evidence["problem_domain"] = p.kind, p.domain
 		switch p.kind {
 		case "multiple":
@@ -521,7 +526,7 @@ func (r *run) checkSPFLookups() {
 			c.Fix = &verdict.Fix{Who: who, Text: "Remove the mechanisms in the SPF record for " + r.spfDom + " that name hosts with no DNS records."}
 		}
 	case w.lookups > spfLookupLimit:
-		c.Status, c.Title, c.Detail = verdict.Fail, "SPF needs more than 10 DNS lookups", permerror
+		c.Status, c.Title, c.Detail = status, "SPF needs more than 10 DNS lookups", permerror
 		c.Fix = &verdict.Fix{Who: who, Text: "Remove includes that are no longer used from the SPF record for " + r.spfDom + "."}
 	case w.lookups >= 8:
 		c.Status, c.Title = verdict.Warn, fmt.Sprintf("SPF needs %d of 10 DNS lookups", w.lookups)
