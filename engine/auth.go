@@ -77,6 +77,14 @@ type dmarcRecord struct {
 	ParseErr error
 }
 
+// isDMARCRecord reports whether a TXT record's first tag is v=DMARC1. RFC 7489
+// allows spaces around the equals sign, and any other version is not DMARC.
+func isDMARCRecord(t string) bool {
+	first, _, _ := strings.Cut(t, ";")
+	k, v, _ := strings.Cut(first, "=")
+	return strings.EqualFold(strings.TrimSpace(k), "v") && strings.TrimSpace(v) == "DMARC1"
+}
+
 // tolerantDMARC reads the tags that decide the outcome from a record that
 // does not parse, and leaves the rest at their defaults. It returns nil when
 // the policy itself is unusable.
@@ -743,7 +751,7 @@ func (r *run) lookupDMARC() (*dmarcRecord, error) {
 		}
 		var recs []string
 		for _, t := range txts {
-			if strings.HasPrefix(t, "v=DMARC1") {
+			if isDMARCRecord(t) {
 				recs = append(recs, t)
 			}
 		}
