@@ -181,7 +181,7 @@ func (r *run) checkShorteners() {
 		}
 	}
 	if len(found.items) == 0 {
-		r.add(r.partial(verdict.Check{ID: "content.shorteners", Category: verdict.Content, Status: verdict.Pass, Title: "No link shorteners"}))
+		r.add(r.partial(verdict.Check{ID: "content.shorteners", Category: verdict.Content, Status: verdict.Pass, Title: "No link shorteners", Evidence: map[string]any{"links": len(r.parsed.Links)}}))
 		return
 	}
 	ev := map[string]any{}
@@ -327,7 +327,7 @@ func (r *run) checkLinkTextMismatch() {
 		bad = append(bad, map[string]string{"text": l.Words, "href": l.Href})
 	}
 	if len(bad) == 0 {
-		r.add(r.partial(verdict.Check{ID: "content.link_text", Category: verdict.Content, Status: verdict.Pass, Title: "Links go where their text says"}))
+		r.add(r.partial(verdict.Check{ID: "content.link_text", Category: verdict.Content, Status: verdict.Pass, Title: "Links go where their text says", Evidence: map[string]any{"links": len(r.parsed.Links)}}))
 		return
 	}
 	ev := map[string]any{}
@@ -357,7 +357,7 @@ func (r *run) checkActiveContent() {
 		found = append(found[:maxEvidenceItems:maxEvidenceItems], fmt.Sprintf("%d more", len(found)-maxEvidenceItems))
 	}
 	if len(found) == 0 {
-		r.add(verdict.Check{ID: "content.active", Category: verdict.Content, Status: verdict.Pass, Title: "No scripts, forms, embeds, or attachments"})
+		r.add(verdict.Check{ID: "content.active", Category: verdict.Content, Status: verdict.Pass, Title: "No scripts, forms, embeds, or attachments", Evidence: map[string]any{"found": []string{}}})
 		return
 	}
 	detail := "Mail clients strip scripts, forms, and embeds, and filters are wary of them and of attachments in bulk mail."

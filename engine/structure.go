@@ -51,12 +51,18 @@ func (r *run) structure() {
 			Fix:      &verdict.Fix{Who: verdict.FixedByProvider, Text: "Send the raw message to your email platform's support, so they can fix how it is built."},
 		})
 	default:
-		r.add(verdict.Check{ID: "struct.mime", Category: verdict.Structure, Status: verdict.Pass, Title: "The MIME structure parses cleanly"})
+		r.add(verdict.Check{
+			ID: "struct.mime", Category: verdict.Structure, Status: verdict.Pass, Title: "The MIME structure parses cleanly",
+			Evidence: map[string]any{"has_html": m.HTML != "", "has_text": m.Text != ""},
+		})
 	}
 
 	switch {
 	case strings.TrimSpace(m.Text) != "":
-		r.add(verdict.Check{ID: "struct.plain_text", Category: verdict.Structure, Status: verdict.Pass, Title: "Has a plain text version"})
+		r.add(verdict.Check{
+			ID: "struct.plain_text", Category: verdict.Structure, Status: verdict.Pass, Title: "Has a plain text version",
+			Evidence: map[string]any{"text_bytes": len(m.Text)},
+		})
 	case m.HTML == "":
 		r.add(verdict.Check{ID: "struct.plain_text", Category: verdict.Structure, Status: verdict.Warn, Title: "The message has no readable body"})
 	default:
@@ -104,7 +110,10 @@ func (r *run) structure() {
 			Fix:      &verdict.Fix{Who: verdict.FixedByProvider, Text: "These headers are required by RFC 5322; your email platform should set them."},
 		})
 	} else {
-		r.add(verdict.Check{ID: "struct.headers", Category: verdict.Structure, Status: verdict.Pass, Title: "Message-ID, Date, and From are present"})
+		r.add(verdict.Check{
+			ID: "struct.headers", Category: verdict.Structure, Status: verdict.Pass, Title: "Message-ID, Date, and From are present",
+			Evidence: map[string]any{"message_id": m.Header.Get("Message-Id"), "date": m.Header.Get("Date"), "from": froms[0].Address},
+		})
 	}
 
 	if freeMailboxDomains[r.fromDom] {
@@ -116,7 +125,10 @@ func (r *run) structure() {
 			Fix:      &verdict.Fix{Who: verdict.FixedByYou, Text: "Send from an address on a domain you own."},
 		})
 	} else if r.fromDom != "" {
-		r.add(verdict.Check{ID: "struct.from_domain", Category: verdict.Structure, Status: verdict.Pass, Title: "Sent from your own domain (" + r.fromDom + ")"})
+		r.add(verdict.Check{
+			ID: "struct.from_domain", Category: verdict.Structure, Status: verdict.Pass, Title: "Sent from your own domain (" + r.fromDom + ")",
+			Evidence: map[string]any{"from_domain": r.fromDom},
+		})
 	} else {
 		r.add(skipped("struct.from_domain", verdict.Structure, "From domain not checked", "The From header has no address with a domain to check."))
 	}

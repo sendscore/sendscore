@@ -10,7 +10,13 @@ final class Binary
     public const ENGINE_VERSION = '0.2.0';
     public const RELEASES = 'https://github.com/sendscore/sendscore/releases/download';
 
-    /** SENDSCORE_BIN, then PATH, then the cache, then a download. */
+    private const MAX_DOWNLOAD = 100 << 20;
+
+    /**
+     * SENDSCORE_BIN, then the pinned version on PATH, then the cache, then a
+     * download. A cached binary is checked against its pinned hash every time,
+     * so a file planted in the cache is replaced and never run.
+     */
     public static function find(): string
     {
         $fromEnv = getenv('SENDSCORE_BIN');
@@ -19,15 +25,62 @@ final class Binary
         }
         $exe = PHP_OS_FAMILY === 'Windows' ? 'sendscore.exe' : 'sendscore';
         foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $dir) {
-            if ($dir !== '' && is_file("$dir/$exe") && is_executable("$dir/$exe")) {
-                return "$dir/$exe";
+            $path = "$dir/$exe";
+            if (self::isAbsolute($dir) && is_file($path) && is_executable($path) && self::rightVersion($path)) {
+                return $path;
             }
         }
+        $target = self::platform();
+        $pin = self::pinFor($target[0], $target[1]);
         $dir = self::cacheRoot() . '/sendscore/' . self::ENGINE_VERSION;
-        if (is_executable("$dir/$exe")) {
+        if (self::matchesPin("$dir/$exe", $pin)) {
             return "$dir/$exe";
         }
-        return self::download(self::ENGINE_VERSION, self::RELEASES . '/v' . self::ENGINE_VERSION, $dir);
+        return self::download(self::ENGINE_VERSION, self::RELEASES . '/v' . self::ENGINE_VERSION, $dir, $pin, $target);
+    }
+
+    private static function isAbsolute(string $path): bool
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            return preg_match('/^(?:[A-Za-z]:[\\\/]|\\\\)/', $path) === 1;
+        }
+        return str_starts_with($path, '/');
+    }
+
+    private static function rightVersion(string $path): bool
+    {
+        try {
+            [$code, $stdout] = Process::run([$path, '--version'], null, 10.0);
+        } catch (SendScoreException) {
+            return false;
+        }
+        $words = preg_split('/\s+/', trim($stdout));
+        return $code === 0 && $words !== false && ltrim((string) end($words), 'v') === self::ENGINE_VERSION;
+    }
+
+    /**
+     * The archive and binary hashes of a platform. With none, nothing is trusted.
+     *
+     * @param array<string, array{0: string, 1: string}> $pins
+     * @return array{0: string, 1: string}
+     */
+    public static function pinFor(string $os, string $arch, array $pins = Hashes::PINS): array
+    {
+        $pin = $pins["{$os}_{$arch}"] ?? null;
+        if ($pin === null) {
+            throw new SendScoreException("this package has no pinned hash for {$os}_{$arch}, so it will not download a CLI. Install the matching sendscore on PATH, or set SENDSCORE_BIN.");
+        }
+        return $pin;
+    }
+
+    /**
+     * Whether a file exists and is exactly the pinned binary.
+     *
+     * @param array{0: string, 1: string} $pin
+     */
+    public static function matchesPin(string $path, array $pin): bool
+    {
+        return is_file($path) && hash_equals($pin[1], (string) hash_file('sha256', $path));
     }
 
     /** @return array{0: string, 1: string} */
@@ -47,7 +100,7 @@ final class Binary
         return match (PHP_OS_FAMILY) {
             'Darwin' => "$home/Library/Caches",
             'Windows' => (string) (getenv('LOCALAPPDATA') ?: "$home/AppData/Local"),
-            default => (string) (getenv('XDG_CACHE_HOME') ?: "$home/.cache"),
+            default => self::isAbsolute((string) getenv('XDG_CACHE_HOME')) ? (string) getenv('XDG_CACHE_HOME') : "$home/.cache",
         };
     }
 
@@ -59,23 +112,18 @@ final class Binary
 
     private static function fetch(string $url): string
     {
+        if (!ini_get('allow_url_fopen')) {
+            throw new SendScoreException('downloading the CLI needs allow_url_fopen. Install sendscore on PATH, or set SENDSCORE_BIN.');
+        }
         $context = stream_context_create(['http' => ['follow_location' => 1, 'max_redirects' => 5, 'timeout' => 60, 'ignore_errors' => false]]);
-        $body = @file_get_contents($url, false, $context);
+        $body = @file_get_contents($url, false, $context, 0, self::MAX_DOWNLOAD + 1);
         if ($body === false) {
             throw new SendScoreException("download of $url failed");
         }
-        return $body;
-    }
-
-    private static function expectedHash(string $checksums, string $name): string
-    {
-        foreach (explode("\n", $checksums) as $line) {
-            $parts = preg_split('/\s+/', trim($line));
-            if ($parts !== false && count($parts) === 2 && $parts[1] === $name) {
-                return strtolower($parts[0]);
-            }
+        if (strlen($body) > self::MAX_DOWNLOAD) {
+            throw new SendScoreException("download of $url is too large");
         }
-        throw new SendScoreException("checksums.txt does not list $name");
+        return $body;
     }
 
     /** Reads one file, by its exact name, from a tar archive. */
@@ -126,20 +174,20 @@ final class Binary
 
     /**
      * Downloads a release into $dir and returns the binary's path. The archive
-     * is checked against checksums.txt before anything is extracted, so a
-     * binary that does not match never reaches the disk.
+     * must match its pin before anything is extracted, and the binary must
+     * match its pin before it reaches the disk.
      *
+     * @param array{0: string, 1: string} $pin
      * @param array{0: string, 1: string}|null $target
      */
-    public static function download(string $version, string $base, string $dir, ?array $target = null): string
+    public static function download(string $version, string $base, string $dir, array $pin, ?array $target = null): string
     {
         [$os, $arch] = $target ?? self::platform();
         $exe = $os === 'windows' ? 'sendscore.exe' : 'sendscore';
         $name = self::archiveName($version, $os, $arch);
-        $checksums = self::fetch("$base/checksums.txt");
         $archive = self::fetch("$base/$name");
-        if (!hash_equals(self::expectedHash($checksums, $name), hash('sha256', $archive))) {
-            throw new SendScoreException("$name does not match checksums.txt");
+        if (!hash_equals($pin[0], hash('sha256', $archive))) {
+            throw new SendScoreException("$name does not match its pinned hash");
         }
         if ($os === 'windows') {
             $binary = self::fromZip($archive, $exe);
@@ -150,16 +198,19 @@ final class Binary
         if ($binary === null) {
             throw new SendScoreException("$name has no $exe");
         }
+        if (!hash_equals($pin[1], hash('sha256', $binary))) {
+            throw new SendScoreException("the binary in $name does not match its pinned hash");
+        }
         if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
             throw new SendScoreException("could not make $dir");
         }
-        $temp = tempnam($dir, '.download-');
-        if ($temp === false || file_put_contents($temp, $binary) === false) {
+        $temp = @tempnam($dir, '.download-');
+        if ($temp === false || @file_put_contents($temp, $binary) === false) {
             throw new SendScoreException("could not write to $dir");
         }
-        chmod($temp, 0755);
-        if (!rename($temp, "$dir/$exe")) {
-            unlink($temp);
+        @chmod($temp, 0755);
+        if (!@rename($temp, "$dir/$exe")) {
+            @unlink($temp);
             throw new SendScoreException("could not write to $dir");
         }
         return "$dir/$exe";

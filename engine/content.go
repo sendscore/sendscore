@@ -630,7 +630,7 @@ scan:
 		}
 	}
 	if len(found) == 0 {
-		c := verdict.Check{ID: "content.placeholders", Category: verdict.Content, Status: verdict.Pass, Title: "No unrendered merge tags"}
+		c := verdict.Check{ID: "content.placeholders", Category: verdict.Content, Status: verdict.Pass, Title: "No unrendered merge tags", Evidence: map[string]any{"found": []string{}}}
 		if limited {
 			c.Status, c.Title = verdict.Info, fmt.Sprintf("No unrendered merge tags in the first %d candidates", maxDistinctTags)
 		}
@@ -703,7 +703,7 @@ func (r *run) checkInsecureLinks() {
 		}
 	}
 	if len(insecure) == 0 {
-		r.add(r.partial(verdict.Check{ID: "content.insecure_links", Category: verdict.Content, Status: verdict.Pass, Title: "Every link and image uses https"}))
+		r.add(r.partial(verdict.Check{ID: "content.insecure_links", Category: verdict.Content, Status: verdict.Pass, Title: "Every link and image uses https", Evidence: map[string]any{"links": len(r.parsed.Links), "images": len(r.parsed.Images)}}))
 		return
 	}
 	ev := map[string]any{}
@@ -732,7 +732,7 @@ func (r *run) checkImageAlt() {
 	case content == 0:
 		r.add(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Info, Title: "No content images", Evidence: r.noteLimit(nil)})
 	case len(missing) == 0:
-		r.add(r.partial(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Pass, Title: "Every image has alt text"}))
+		r.add(r.partial(verdict.Check{ID: "content.image_alt", Category: verdict.Content, Status: verdict.Pass, Title: "Every image has alt text", Evidence: map[string]any{"images": content}}))
 	default:
 		ev := map[string]any{}
 		capped(ev, "images", missing)

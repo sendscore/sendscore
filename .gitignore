@@ -18,3 +18,5 @@ Gemfile.lock
 composer.lock
 erl_crash.dump
 packages/**/bin/
+.phpunit.result.cache
+.phpunit.cache/

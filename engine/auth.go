@@ -1047,11 +1047,12 @@ func (r *run) checkTLS() {
 		return
 	}
 	if *t {
-		r.add(verdict.Check{ID: "auth.tls", Category: verdict.Auth, Status: verdict.Pass, Title: "Delivered over TLS"})
+		r.add(verdict.Check{ID: "auth.tls", Category: verdict.Auth, Status: verdict.Pass, Title: "Delivered over TLS", Evidence: map[string]any{"tls": true}})
 		return
 	}
 	r.add(verdict.Check{
 		ID: "auth.tls", Category: verdict.Auth, Status: verdict.Fail, Title: "Delivered without TLS",
+		Evidence: map[string]any{"tls": false},
 		Fix:  &verdict.Fix{Who: verdict.FixedByProvider, Text: "Gmail requires bulk mail over TLS. Ask your email platform why it did not use STARTTLS."},
 		Docs: docsGmail,
 	})

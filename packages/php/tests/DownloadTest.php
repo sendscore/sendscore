@@ -14,18 +14,28 @@ final class DownloadTest extends TestCase
     private static $server;
     private static string $base;
     private string $tmp;
+    /** @var array<string, array{0: string, 1: string}> */
+    private static array $pins = [];
 
     public static function setUpBeforeClass(): void
     {
+        foreach (json_decode((string) file_get_contents(__DIR__ . '/../../../conformance/release/pins.json'), true) as $key => $pin) {
+            self::$pins[$key] = [$pin['archive'], $pin['binary']];
+        }
         $socket = stream_socket_server('tcp://127.0.0.1:0');
         $port = (int) substr(strrchr(stream_socket_get_name($socket, false), ':'), 1);
         fclose($socket);
         $root = realpath(__DIR__ . '/../../../conformance/release');
-        self::$server = proc_open([PHP_BINARY, '-S', "127.0.0.1:$port", '-t', $root], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+        self::$server = proc_open([PHP_BINARY, '-S', "127.0.0.1:$port", '-t', $root], [1 => ['file', self::nowhere(), 'w'], 2 => ['file', self::nowhere(), 'w']], $pipes);
         self::$base = "http://127.0.0.1:$port";
         for ($i = 0; $i < 50 && !@fsockopen('127.0.0.1', $port); $i++) {
             usleep(100000);
         }
+    }
+
+    private static function nowhere(): string
+    {
+        return PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
     }
 
     public static function tearDownAfterClass(): void
@@ -43,9 +53,11 @@ final class DownloadTest extends TestCase
     {
         foreach ([['linux', 'amd64'], ['darwin', 'arm64'], ['windows', 'amd64']] as $i => $target) {
             $dir = "$this->tmp/cache$i";
-            $path = Binary::download('0.0.0-test', self::$base . '/good', $dir, $target);
+            $path = Binary::download('0.0.0-test', self::$base . '/good', $dir, self::$pins[implode('_', $target)], $target);
             $this->assertStringContainsString('fake sendscore', (string) file_get_contents($path));
-            $this->assertTrue(is_executable($path));
+            if (PHP_OS_FAMILY !== 'Windows') {
+                $this->assertTrue(is_executable($path));
+            }
             $this->assertSame([basename($path)], array_values(array_diff(scandir($dir), ['.', '..'])));
             $this->assertFileDoesNotExist("$this->tmp/evil");
         }
@@ -54,7 +66,7 @@ final class DownloadTest extends TestCase
     public function testRefusesAMismatch(): void
     {
         try {
-            Binary::download('0.0.0-test', self::$base . '/tampered', "$this->tmp/cache", ['linux', 'amd64']);
+            Binary::download('0.0.0-test', self::$base . '/altered', "$this->tmp/cache", self::$pins['linux_amd64'], ['linux', 'amd64']);
             $this->fail('expected a refusal');
         } catch (SendScoreException) {
             $this->assertDirectoryDoesNotExist("$this->tmp/cache");
@@ -64,6 +76,32 @@ final class DownloadTest extends TestCase
     public function testFailsOnAMissingRelease(): void
     {
         $this->expectException(SendScoreException::class);
-        Binary::download('0.0.0-test', self::$base . '/nothing', "$this->tmp/cache", ['linux', 'amd64']);
+        Binary::download('0.0.0-test', self::$base . '/nothing', "$this->tmp/cache", self::$pins['linux_amd64'], ['linux', 'amd64']);
+    }
+
+    public function testRefusesABinaryThatDoesNotMatch(): void
+    {
+        $wrong = [self::$pins['linux_amd64'][0], str_repeat('0', 64)];
+        try {
+            Binary::download('0.0.0-test', self::$base . '/good', "$this->tmp/cache", $wrong, ['linux', 'amd64']);
+            $this->fail('expected a refusal');
+        } catch (SendScoreException) {
+            $this->assertDirectoryDoesNotExist("$this->tmp/cache");
+        }
+    }
+
+    public function testCachedBinaryIsTrustedOnlyWhileItMatches(): void
+    {
+        $pin = self::$pins['linux_amd64'];
+        $path = Binary::download('0.0.0-test', self::$base . '/good', "$this->tmp/cache", $pin, ['linux', 'amd64']);
+        $this->assertTrue(Binary::matchesPin($path, $pin));
+        file_put_contents($path, 'planted');
+        $this->assertFalse(Binary::matchesPin($path, $pin));
+    }
+
+    public function testNoPinMeansNoDownload(): void
+    {
+        $this->expectException(SendScoreException::class);
+        Binary::pinFor('linux', 'amd64', []);
     }
 }
