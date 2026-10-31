@@ -33,7 +33,7 @@ Each package runs this CLI, so they all return the same verdict and pass the sam
 | Java | `ai.sendscore:sendscore` | [packages/java](packages/java) |
 | .NET | `dotnet add package SendScore` | [packages/dotnet](packages/dotnet) |
 
-Go code can import the engine directly, as [below](#use-it-from-go) shows. A package finds the CLI in `SENDSCORE_BIN`, then on `PATH`, then in your user cache, and otherwise downloads the pinned release and checks it against the release's `checksums.txt` before running it. None has an install script.
+Go code can import the engine directly, as [below](#use-it-from-go) shows. A package uses `SENDSCORE_BIN`, then the pinned version on `PATH`, then your user cache, and otherwise downloads the pinned release. A package carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. None has an install script.
 
 ## Use
 

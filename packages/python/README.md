@@ -22,6 +22,8 @@ diff("before.eml", "after.eml")
 
 A message that fails its checks is still a report, so `check` returns it. `SendScoreError` is raised only when no report could be made, and its `exit_code` is the CLI's. Receipt at SendScore does not prove inbox placement at Gmail or any other provider.
 
+Pass `timeout` in seconds to `check` or `diff` to kill the CLI when it runs out. A killed CLI raises `SendScoreError` with `exit_code` set to `KILLED`, which is -1.
+
 ## The binary
 
-The package looks for the CLI in `SENDSCORE_BIN`, then on `PATH`, then in your user cache. If none has it, the first call downloads the pinned release from GitHub, and checks it against the release's `checksums.txt` before it is ever run. There is no install script and no dependency.
+The package uses `SENDSCORE_BIN`, then the CLI on `PATH` if its version matches, then your user cache. If none has it, the first call downloads the pinned release from GitHub. The package carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. `SENDSCORE_BIN` is your own choice, so its version is not checked. There is no install script.

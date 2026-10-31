@@ -24,6 +24,8 @@ diff("before.eml", "after.eml")?;
 
 A message that fails its checks is still a report, so `check` returns it. An `Error` means no report could be made, and its `exit_code` is the CLI's. Receipt at SendScore does not prove inbox placement at Gmail or any other provider.
 
+Set `timeout` in `CheckOptions`, or use `diff_with`, to kill the CLI when it runs out. A killed CLI returns an `Error` with `exit_code` set to `KILLED`, which is -1.
+
 ## The binary
 
-The crate looks for the CLI in `SENDSCORE_BIN`, then on `PATH`, then in your user cache. If none has it, the first call downloads the pinned release from GitHub, and checks it against the release's `checksums.txt` before it is ever run. There is no build script.
+The crate uses `SENDSCORE_BIN`, then the CLI on `PATH` if its version matches, then your user cache. If none has it, the first call downloads the pinned release from GitHub. The crate carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. `SENDSCORE_BIN` is your own choice, so its version is not checked. There is no install script.

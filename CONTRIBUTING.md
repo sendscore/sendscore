@@ -24,6 +24,29 @@ go test . -run TestConformance -update
 
 ## Releasing
 
-Every package has the same version as the CLI, and pins that version in a constant it downloads when no CLI is installed, so a package only ever runs a CLI it was tested against. `TestPackageVersions` fails if any of them disagree, so a new version changes all of them in one commit, along with the `want` constant in that test.
+Every package has the same version as the CLI. `packageVersion` in `packages_test.go` names it, and `TestPackageVersions` fails if any package disagrees, so a new version changes all of them in one commit. A package only ever runs a CLI of that version, unless `SENDSCORE_BIN` says otherwise. The release workflow runs the same test, so a tag that differs from `packageVersion` stops the release.
 
-The tag comes after that commit. Tagging creates a draft GitHub release with the binaries, and the packages can only be published once that release is public, because they download from it.
+Go serves a tag forever once anyone has fetched it, so a tag is never moved. If one was wrong, release the next version.
+
+A package trusts the SHA-256 values committed in its own hashes file, not `checksums.txt`, because anyone who could replace a release file could replace that too. Before a release those files are empty, and a package refuses to download anything, which is why the hashes come after the tag.
+
+1. Commit the new version everywhere, with `go run ./scripts/pinhashes -clear`.
+2. Tag that commit and push the tag. The release workflow makes a draft GitHub release.
+3. Look over the draft, then pin it.
+
+   ```sh
+   gh release download v0.3.0 --dir /tmp/release
+   go run ./scripts/pinhashes /tmp/release
+   ```
+
+4. Commit and push the hashes. The script refuses a file that does not match `checksums.txt`, and `TestPackagePins` checks that all eight packages agree.
+5. Publish the GitHub release, because packages download from it, and turn on immutable releases for the repository so its files cannot change afterward.
+6. Publish the packages from the commit with the hashes.
+
+### Registries
+
+npm, PyPI, crates.io, RubyGems, NuGet, and Hex publish from their `packages/` directories.
+
+Packagist reads `composer.json` from the root of a repository, so PHP needs a read-only split. Create `sendscore/sendscore-php`, push `packages/php` to it with `git subtree split --prefix packages/php`, tag each release there with the same version, and submit that repository to Packagist. `packages/php/.gitattributes` keeps tests out of the installed package.
+
+Maven Central needs the `ai.sendscore` namespace verified at central.sonatype.com, and a GPG key. Then run `mvn -Prelease deploy` in `packages/java`.
