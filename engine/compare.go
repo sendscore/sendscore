@@ -12,6 +12,20 @@ import (
 // out.
 const sizeJump = 0.25
 
+// authRank orders the results of an authentication check, best highest, and
+// is 0 for one that says nothing, such as skipped.
+func authRank(s verdict.Status) int {
+	switch s {
+	case verdict.Pass:
+		return 3
+	case verdict.Warn, verdict.Info:
+		return 2
+	case verdict.Fail:
+		return 1
+	}
+	return 0
+}
+
 // Compare lists what changed from prev to cur. A change is plain information
 // unless it made a check worse, in which case Worsened names that check.
 func Compare(prev, cur *verdict.Fingerprint) []verdict.Change {
@@ -28,14 +42,14 @@ func Compare(prev, cur *verdict.Fingerprint) []verdict.Change {
 
 	for _, name := range []string{"dkim", "spf", "dmarc"} {
 		before, after := prev.Auth[name], cur.Auth[name]
-		if before != verdict.Pass || after == verdict.Pass {
+		if before == after || before == "" {
 			continue
 		}
-		// A result that was not checked this time is a change, but not
-		// evidence that anything got worse.
-		w := "auth." + name
-		if after == verdict.Skipped || after == "" {
-			w = ""
+		// A result that was not checked this time, or last time, is a
+		// change, but not evidence that anything got worse.
+		w := ""
+		if authRank(after) > 0 && authRank(after) < authRank(before) {
+			w = "auth." + name
 		}
 		add("auth."+name, before, after, w)
 	}
