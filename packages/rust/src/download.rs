@@ -245,6 +245,11 @@ pub fn download(version: &str, base: &str, dir: &Path, os: &str, arch: &str, pin
     })();
     if installed.is_err() {
         let _ = fs::remove_file(&temp);
+        // On Windows a rename fails while another caller is installing the
+        // same file, and that caller's copy is what this one would have left.
+        if fs::read(dir.join(exe)).is_ok_and(|bytes| bytes == binary) {
+            return Ok(dir.join(exe));
+        }
     }
     installed.map_err(write)
 }
