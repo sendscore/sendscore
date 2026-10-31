@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, relative } from "node:path";
+import { delimiter, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ENGINE_VERSION, KILLED, SendScoreError, binary, check, diff } from "../dist/index.js";
@@ -85,9 +85,15 @@ test("the pinned version on PATH is used", async () => {
 });
 
 test("a relative PATH entry is skipped", async () => {
-  fake(`version-${ENGINE_VERSION}`);
-  onlyPath(["", relative(process.cwd(), join(tmp, `version-${ENGINE_VERSION}`))].join(delimiter));
-  await assert.rejects(binary(), /no pinned hash/);
+  const dir = `version-${ENGINE_VERSION}`;
+  mkdirSync(dir, { recursive: true });
+  copyFileSync(fake(dir), join(dir, exe));
+  try {
+    onlyPath(["", dir].join(delimiter));
+    await assert.rejects(binary(), /no pinned hash/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a directory named sendscore on PATH does not stop the search", async () => {

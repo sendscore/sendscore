@@ -1,7 +1,6 @@
 require "fileutils"
 require "minitest/autorun"
 require "sendscore"
-require "pathname"
 require "tmpdir"
 
 class CliTest < Minitest::Test
@@ -76,10 +75,13 @@ class CliTest < Minitest::Test
   end
 
   def test_relative_path_entries_are_skipped
-    path = fake("version-#{SendScore::ENGINE_VERSION}")
-    relative = Pathname.new(File.dirname(path)).relative_path_from(Pathname.new(Dir.pwd)).to_s
-    only_path([relative, ""].join(File::PATH_SEPARATOR))
+    name = "version-#{SendScore::ENGINE_VERSION}"
+    FileUtils.mkdir_p(name)
+    FileUtils.cp(fake(name), File.join(name, EXE))
+    only_path([name, ""].join(File::PATH_SEPARATOR))
     assert_match(/no pinned hash/, assert_raises(SendScore::Error) { SendScore::Binary.find }.message)
+  ensure
+    FileUtils.rm_rf(name)
   end
 
   def test_paths_that_look_like_flags_are_files

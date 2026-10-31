@@ -79,7 +79,7 @@ module SendScore
            when /darwin/ then "darwin"
            when /mswin|mingw/ then "windows"
            end
-      arch = { "x86_64" => "amd64", "amd64" => "amd64", "arm64" => "arm64", "aarch64" => "arm64" }[RbConfig::CONFIG["host_cpu"]]
+      arch = { "x86_64" => "amd64", "x64" => "amd64", "amd64" => "amd64", "arm64" => "arm64", "aarch64" => "arm64" }[RbConfig::CONFIG["host_cpu"]]
       raise Error.new("no SendScore build for #{RbConfig::CONFIG['host_os']} on #{RbConfig::CONFIG['host_cpu']}", 0) unless os && arch
 
       [os, arch]

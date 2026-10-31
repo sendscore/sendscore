@@ -130,12 +130,15 @@ fn the_pinned_version_on_path_is_used() {
 #[test]
 fn relative_path_entries_are_skipped() {
     let _g = guard();
-    let path = fake(&format!("version-{ENGINE_VERSION}"));
-    let up: PathBuf = env::current_dir().unwrap().components().skip(1).map(|_| "..").collect();
-    let relative = up.join(path.parent().unwrap().strip_prefix(path.ancestors().last().unwrap()).unwrap_or(Path::new("")));
-    let joined = env::join_paths([PathBuf::new(), relative]).unwrap();
+    let name = format!("version-{ENGINE_VERSION}");
+    let path = fake(&name);
+    fs::create_dir_all(&name).unwrap();
+    fs::copy(&path, Path::new(&name).join(EXE)).unwrap();
+    let joined = env::join_paths([PathBuf::new(), PathBuf::from(&name)]).unwrap();
     only_path(&joined);
-    assert!(find_binary().unwrap_err().message.contains("no pinned hash"));
+    let found = find_binary();
+    fs::remove_dir_all(&name).unwrap();
+    assert!(found.unwrap_err().message.contains("no pinned hash"));
 }
 
 #[test]

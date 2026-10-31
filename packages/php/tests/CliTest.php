@@ -129,17 +129,25 @@ final class CliTest extends TestCase
         $mode = 'version-' . Binary::ENGINE_VERSION;
         $path = $this->fake($mode);
         $this->onlyPath(self::$tmp . "/$mode");
-        $this->assertSame($path, Binary::find());
+        $this->assertSame(realpath($path), realpath(Binary::find()));
     }
 
     public function testRelativePathEntriesAreSkipped(): void
     {
         $mode = 'version-' . Binary::ENGINE_VERSION;
-        $this->fake($mode);
-        $cwd = (string) getcwd();
-        $this->onlyPath(PATH_SEPARATOR . str_repeat('../', substr_count($cwd, '/')) . ltrim(self::$tmp, '/') . "/$mode");
-        $this->expectExceptionMessage('no pinned hash');
-        Binary::find();
+        @mkdir($mode);
+        copy($this->fake($mode), "$mode/" . self::$exe);
+        chmod("$mode/" . self::$exe, 0755);
+        $this->onlyPath(PATH_SEPARATOR . $mode);
+        try {
+            Binary::find();
+            $this->fail('expected no CLI to be found');
+        } catch (SendScoreException $e) {
+            $this->assertStringContainsString('no pinned hash', $e->getMessage());
+        } finally {
+            unlink("$mode/" . self::$exe);
+            rmdir($mode);
+        }
     }
 
     public function testPathsThatLookLikeFlagsAreFiles(): void

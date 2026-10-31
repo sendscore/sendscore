@@ -133,10 +133,19 @@ public class CliTests : IDisposable
     [Fact]
     public async Task RelativePathEntriesAreSkipped()
     {
-        var path = Fake($"version-{Binary.EngineVersion}");
-        OnlyPath(Path.PathSeparator + Path.GetRelativePath(Directory.GetCurrentDirectory(), Path.GetDirectoryName(path)!));
-        var e = await Assert.ThrowsAsync<SendScoreException>(() => Binary.FindAsync());
-        Assert.Contains("no pinned hash", e.Message);
+        var name = $"version-{Binary.EngineVersion}";
+        Directory.CreateDirectory(name);
+        File.Copy(Fake(name), Path.Combine(name, Exe), true);
+        try
+        {
+            OnlyPath(Path.PathSeparator + name);
+            var e = await Assert.ThrowsAsync<SendScoreException>(() => Binary.FindAsync());
+            Assert.Contains("no pinned hash", e.Message);
+        }
+        finally
+        {
+            Directory.Delete(name, true);
+        }
     }
 
     [Fact]

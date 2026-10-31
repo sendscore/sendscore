@@ -80,10 +80,14 @@ class Cli(unittest.TestCase):
             self.assertEqual(find_binary(), path)
 
     def test_relative_path_entries_are_skipped(self):
-        self.fake(f"version-{ENGINE_VERSION}")
-        relative = os.path.relpath(self.tmp / f"version-{ENGINE_VERSION}")
-        with self.only_path(os.pathsep.join(["", relative])), self.assertRaisesRegex(SendScoreError, "no pinned hash"):
-            find_binary()
+        name = f"version-{ENGINE_VERSION}"
+        os.makedirs(name, exist_ok=True)
+        try:
+            shutil.copy2(self.fake(name), os.path.join(name, EXE))
+            with self.only_path(os.pathsep.join(["", name])), self.assertRaisesRegex(SendScoreError, "no pinned hash"):
+                find_binary()
+        finally:
+            shutil.rmtree(name)
 
     def test_directory_on_path_does_not_stop_the_search(self):
         path = self.fake(f"version-{ENGINE_VERSION}")

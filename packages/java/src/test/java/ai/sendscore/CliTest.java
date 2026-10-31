@@ -110,10 +110,18 @@ class CliTest {
 
   @Test
   void relativePathEntriesAreSkipped() throws IOException {
-    Path path = fake("version-" + Binary.ENGINE_VERSION);
-    String relative = Path.of("").toAbsolutePath().relativize(path.getParent()).toString();
-    onlyPath(File.pathSeparator + relative);
-    assertTrue(assertThrows(SendScoreException.class, Binary::find).getMessage().contains("no pinned hash"));
+    String name = "version-" + Binary.ENGINE_VERSION;
+    Path copy = Path.of(name, EXE);
+    Files.createDirectories(copy.getParent());
+    Files.copy(fake(name), copy, StandardCopyOption.REPLACE_EXISTING);
+    copy.toFile().setExecutable(true, false);
+    try {
+      onlyPath(File.pathSeparator + name);
+      assertTrue(assertThrows(SendScoreException.class, Binary::find).getMessage().contains("no pinned hash"));
+    } finally {
+      Files.deleteIfExists(copy);
+      Files.deleteIfExists(copy.getParent());
+    }
   }
 
   @Test

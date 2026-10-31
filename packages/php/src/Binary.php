@@ -25,8 +25,9 @@ final class Binary
         }
         $exe = PHP_OS_FAMILY === 'Windows' ? 'sendscore.exe' : 'sendscore';
         foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $dir) {
-            $path = "$dir/$exe";
-            if (self::isAbsolute($dir) && is_file($path) && is_executable($path) && self::rightVersion($path)) {
+            $path = $dir . DIRECTORY_SEPARATOR . $exe;
+            $runnable = is_file($path) && (PHP_OS_FAMILY === 'Windows' || is_executable($path));
+            if (self::isAbsolute($dir) && $runnable && self::rightVersion($path)) {
                 return $path;
             }
         }

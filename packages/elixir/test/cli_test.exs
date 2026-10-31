@@ -76,14 +76,17 @@ defmodule SendScore.CliTest do
   test "the pinned version on PATH is used", ctx do
     path = fake(ctx, "version-#{Binary.engine_version()}")
     only_path(ctx, Path.dirname(path))
-    assert Binary.find() == path
+    assert Path.expand(Binary.find()) == Path.expand(path)
   end
 
   test "relative PATH entries are skipped", ctx do
-    path = fake(ctx, "version-#{Binary.engine_version()}")
-    up = File.cwd!() |> Path.split() |> tl() |> Enum.map(fn _ -> ".." end)
-    relative = Path.join(up ++ (path |> Path.dirname() |> Path.split() |> tl()))
-    only_path(ctx, ":" <> relative)
+    name = "version-#{Binary.engine_version()}"
+    File.mkdir_p!(name)
+    File.cp!(fake(ctx, name), Path.join(name, @exe))
+    File.chmod!(Path.join(name, @exe), 0o755)
+    on_exit(fn -> File.rm_rf!(name) end)
+    separator = if match?({:win32, _}, :os.type()), do: ";", else: ":"
+    only_path(ctx, separator <> name)
     assert_raise SendScore.Error, ~r/no pinned hash/, fn -> Binary.find() end
   end
 
