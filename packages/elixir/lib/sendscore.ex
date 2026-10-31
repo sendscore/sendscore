@@ -6,9 +6,15 @@ defmodule SendScore do
   keys may appear. A message that fails checks is still a report, so `check/2`
   returns `{:ok, verdict}` for it. `{:error, %SendScore.Error{}}` means no
   report could be made.
+
+  Erlang ports cannot capture stderr on its own, so the CLI's stderr goes to
+  this program's stderr, and an error's message names only the exit code.
   """
 
   alias SendScore.{Binary, Error}
+
+  @doc "The `exit_code` of a CLI that was killed, or stopped by a timeout."
+  def killed, do: Error.killed()
 
   @type status :: String.t()
   @type check :: %{required(String.t()) => term()}
@@ -22,13 +28,15 @@ defmodule SendScore do
           | {:helo, String.t()}
           | {:tls, boolean()}
           | {:previous, Path.t()}
+          | {:timeout, non_neg_integer()}
 
   @doc """
   Checks one message, given as a path, or as `{:bytes, data}`.
 
   Erlang ports cannot close a program's standard input on their own, so bytes
   go to a private temporary file that is deleted afterwards, not through
-  standard input as in the other packages.
+  standard input as in the other packages. `timeout:` is in milliseconds, and
+  the CLI is killed when it runs out.
   """
   @spec check(Path.t() | {:bytes, binary()}, [option()]) :: {:ok, verdict()} | {:error, Error.t()}
   def check(message, options \\ [])
@@ -50,16 +58,34 @@ defmodule SendScore do
   end
 
   def check(path, options) when is_binary(path) do
-    run(["check", "--json"] ++ flags(options) ++ ["--", path], [0, 1, 2])
-  end
+    args = ["check", "--json"] ++ flags(options) ++ ["--", path_arg(path)]
 
-  @doc "Compares two saved messages, given as paths."
-  @spec diff(Path.t(), Path.t()) :: {:ok, diff_result()} | {:error, Error.t()}
-  def diff(before, later) do
-    with {:ok, result} <- run(["diff", "--json", "--", before, later], [0, 1]) do
-      {:ok, Map.update(result, "changes", [], &(&1 || []))}
+    with {:ok, result} <- run(args, [0, 1, 2], options[:timeout]) do
+      if String.starts_with?(to_string(result["schema"]), "sendscore.verdict/") do
+        {:ok, result}
+      else
+        {:error, %Error{message: "sendscore printed something that is not a verdict"}}
+      end
     end
   end
+
+  @doc "Compares two saved messages, given as paths. `timeout:` is in milliseconds."
+  @spec diff(Path.t(), Path.t(), timeout: non_neg_integer()) :: {:ok, diff_result()} | {:error, Error.t()}
+  def diff(before, later, options \\ []) do
+    args = ["diff", "--json", "--", path_arg(before), path_arg(later)]
+
+    with {:ok, result} <- run(args, [0, 1], options[:timeout]) do
+      if Map.has_key?(result, "changes") do
+        {:ok, Map.update!(result, "changes", &(&1 || []))}
+      else
+        {:error, %Error{message: "sendscore printed something that is not a comparison"}}
+      end
+    end
+  end
+
+  # A lone "-" would mean standard input to the CLI.
+  defp path_arg("-"), do: "./-"
+  defp path_arg(path), do: path
 
   defp random, do: :crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower)
 
@@ -71,29 +97,34 @@ defmodule SendScore do
       {:mail_from, value} -> ["--mail-from", value]
       {:helo, value} -> ["--helo", value]
       {:tls, value} when is_boolean(value) -> ["--tls", if(value, do: "yes", else: "no")]
-      {:previous, value} -> ["--previous", value]
+      {:previous, value} -> ["--previous", path_arg(value)]
       _ -> []
     end)
   end
 
-  defp run(args, verdict_codes) do
+  defp run(args, verdict_codes, timeout) do
     binary = Binary.find()
-    # System.cmd runs the program directly, with no shell. A verdict prints
-    # nothing on stderr, so the merged output is the JSON or the error.
-    {output, code} = System.cmd(binary, args, stderr_to_stdout: true)
 
-    cond do
-      code not in verdict_codes ->
-        text = String.trim(output)
-        {:error, %Error{message: if(text == "", do: "sendscore exited #{code}", else: text), exit_code: code}}
+    case Binary.execute(binary, args, timeout) do
+      :timeout ->
+        {:error, %Error{message: "sendscore did not finish within #{timeout} ms", exit_code: Error.killed()}}
 
-      true ->
-        case JSON.decode(output) do
-          {:ok, result} when is_map(result) -> {:ok, result}
-          _ -> {:error, %Error{message: "sendscore printed something that is not JSON", exit_code: code}}
+      {code, output} ->
+        if code in verdict_codes do
+          decode(output, code)
+        else
+          {:error, %Error{message: "sendscore exited #{code}", exit_code: code}}
         end
     end
   rescue
-    e in [Error, ErlangError, ArgumentError] -> {:error, %Error{message: Exception.message(e)}}
+    e in Error -> {:error, e}
+    e -> {:error, %Error{message: Exception.message(e)}}
+  end
+
+  defp decode(output, code) do
+    case JSON.decode(output) do
+      {:ok, result} when is_map(result) -> {:ok, result}
+      _ -> {:error, %Error{message: "sendscore printed something that is not JSON", exit_code: code}}
+    end
   end
 end
