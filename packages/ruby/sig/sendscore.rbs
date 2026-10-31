@@ -1,0 +1,25 @@
+module SendScore
+  VERSION: String
+  ENGINE_VERSION: String
+
+  type status = "pass" | "warn" | "fail" | "info" | "skipped"
+
+  # The sendscore.verdict/v1 report has string keys. These are the ones the
+  # schema promises, and more may appear.
+  type check_result = Hash[String, untyped]
+  type verdict = Hash[String, untyped]
+  type diff_result = Hash[String, untyped]
+
+  class Error < StandardError
+    attr_reader exit_code: Integer
+    def initialize: (String message, Integer exit_code) -> void
+  end
+
+  def self.check: (String | _ToS message, ?bytes: bool, ?offline: bool, ?links: bool, ?ip: String?, ?mail_from: String?, ?helo: String?, ?tls: bool?, ?previous: _ToS?) -> verdict
+  def self.diff: (_ToS before, _ToS after) -> diff_result
+
+  module Binary
+    def self.find: () -> String
+    def self.download: (String version, String base, String dir, ?[String, String] target) -> String
+  end
+end
