@@ -17,3 +17,4 @@ __pycache__/
 Gemfile.lock
 composer.lock
 erl_crash.dump
+packages/**/bin/

@@ -18,6 +18,23 @@ go install github.com/sendscore/sendscore@latest
 
 Or build from a clone with `make build`, which writes `bin/sendscore`.
 
+## Use it from another language
+
+Each package runs this CLI, so they all return the same verdict and pass the same [conformance cases](conformance/cases.json). None are published yet.
+
+| Language | Install | Source |
+| --- | --- | --- |
+| TypeScript and JavaScript | `npm install sendscore` | [packages/sdk](packages/sdk) |
+| Python | `pip install sendscore` | [packages/python](packages/python) |
+| PHP | `composer require sendscore/sendscore` | [packages/php](packages/php) |
+| Rust | `cargo add sendscore` | [packages/rust](packages/rust) |
+| Ruby | `gem install sendscore` | [packages/ruby](packages/ruby) |
+| Elixir | `{:sendscore, "~> 0.2"}` | [packages/elixir](packages/elixir) |
+| Java | `ai.sendscore:sendscore` | [packages/java](packages/java) |
+| .NET | `dotnet add package SendScore` | [packages/dotnet](packages/dotnet) |
+
+Go code can import the engine directly, as [below](#use-it-from-go) shows. A package finds the CLI in `SENDSCORE_BIN`, then on `PATH`, then in your user cache, and otherwise downloads the pinned release and checks it against the release's `checksums.txt` before running it. None has an install script.
+
 ## Use
 
 ```sh
