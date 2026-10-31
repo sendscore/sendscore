@@ -1,8 +1,8 @@
+using System.Diagnostics;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace SendScore;
 
@@ -13,9 +13,14 @@ public static class Binary
     public const string EngineVersion = "0.2.0";
 
     private const string Releases = "https://github.com/sendscore/sendscore/releases/download";
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(2) };
+    private const long MaxDownload = 100 << 20;
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(2), MaxResponseContentBufferSize = MaxDownload };
 
-    /// <summary>Finds the CLI: SENDSCORE_BIN, then PATH, then the cache, then a download.</summary>
+    /// <summary>
+    /// Finds the CLI: SENDSCORE_BIN, then the pinned version on PATH, then the cache, then a download.
+    /// A cached binary is checked against its pinned hash every time, so a file planted in the cache
+    /// is replaced and never run.
+    /// </summary>
     public static async Task<string> FindAsync(CancellationToken cancel = default)
     {
         var fromEnv = Environment.GetEnvironmentVariable("SENDSCORE_BIN");
@@ -23,31 +28,105 @@ public static class Binary
         {
             return fromEnv;
         }
-        var target = Platform();
-        var exe = Exe(target.Os);
+        var exe = OperatingSystem.IsWindows() ? "sendscore.exe" : "sendscore";
         foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
-            if (dir.Length > 0 && File.Exists(Path.Combine(dir, exe)))
+            if (!Path.IsPathFullyQualified(dir))
             {
-                return Path.Combine(dir, exe);
+                continue;
+            }
+            var candidate = Path.Combine(dir, exe);
+            if (Executable(candidate) && await RightVersionAsync(candidate, cancel).ConfigureAwait(false))
+            {
+                return candidate;
             }
         }
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create);
-        if (target.Os == "darwin")
-        {
-            root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Caches");
-        }
-        else if (target.Os == "linux")
-        {
-            root = Environment.GetEnvironmentVariable("XDG_CACHE_HOME")
-                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache");
-        }
-        var cache = Path.Combine(root, "sendscore", EngineVersion);
+        var target = Platform();
+        var pin = PinFor(target, Hashes.Pins);
+        var cache = Path.Combine(CacheRoot(target.Os), "sendscore", EngineVersion);
         var cached = Path.Combine(cache, exe);
-        return File.Exists(cached)
+        return MatchesPin(cached, pin)
             ? cached
-            : await DownloadAsync(EngineVersion, $"{Releases}/v{EngineVersion}", cache, target, cancel).ConfigureAwait(false);
+            : await DownloadAsync(EngineVersion, $"{Releases}/v{EngineVersion}", cache, pin, target, cancel).ConfigureAwait(false);
     }
+
+    private static string CacheRoot(string os)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (os == "darwin")
+        {
+            return Path.Combine(home, "Library", "Caches");
+        }
+        if (os == "linux")
+        {
+            var xdg = Environment.GetEnvironmentVariable("XDG_CACHE_HOME");
+            return !string.IsNullOrEmpty(xdg) && Path.IsPathFullyQualified(xdg) ? xdg : Path.Combine(home, ".cache");
+        }
+        return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData, Environment.SpecialFolderOption.Create);
+    }
+
+    private static bool Executable(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return false;
+        }
+        const UnixFileMode Any = UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        return OperatingSystem.IsWindows() || (File.GetUnixFileMode(path) & Any) != 0;
+    }
+
+    private static async Task<bool> RightVersionAsync(string path, CancellationToken cancel)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        var info = new ProcessStartInfo(path) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        info.ArgumentList.Add("--version");
+        using var process = new Process { StartInfo = info };
+        try
+        {
+            process.Start();
+            var error = process.StandardError.ReadToEndAsync(timeout.Token);
+            var output = await process.StandardOutput.ReadToEndAsync(timeout.Token).ConfigureAwait(false);
+            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            await error.ConfigureAwait(false);
+            var words = output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            return process.ExitCode == 0 && words.Length > 0 && words[^1].TrimStart('v') == EngineVersion;
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(true);
+            cancel.ThrowIfCancellationRequested();
+            return false;
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The archive and binary hashes of a platform. With none, nothing is trusted.</summary>
+    internal static (string Archive, string Binary) PinFor((string Os, string Arch) target, Dictionary<string, (string Archive, string Binary)> pins)
+    {
+        var key = $"{target.Os}_{target.Arch}";
+        return pins.TryGetValue(key, out var pin)
+            ? pin
+            : throw new SendScoreException($"this package has no pinned hash for {key}, so it will not download a CLI. Install the matching sendscore on PATH, or set SENDSCORE_BIN.", 0);
+    }
+
+    /// <summary>Whether a file exists and is exactly the pinned binary.</summary>
+    internal static bool MatchesPin(string path, (string Archive, string Binary) pin)
+    {
+        try
+        {
+            return File.Exists(path) && Hash(File.ReadAllBytes(path)) == pin.Binary;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
     private static string Exe(string os) => os == "windows" ? "sendscore.exe" : "sendscore";
 
@@ -81,23 +160,10 @@ public static class Binary
             }
             return await res.Content.ReadAsByteArrayAsync(cancel).ConfigureAwait(false);
         }
-        catch (HttpRequestException e)
+        catch (Exception e) when (e is HttpRequestException or IOException || (e is TaskCanceledException && !cancel.IsCancellationRequested))
         {
             throw new SendScoreException($"download of {url} failed: {e.Message}", 0);
         }
-    }
-
-    private static string ExpectedHash(string checksums, string name)
-    {
-        foreach (var line in checksums.Split('\n'))
-        {
-            var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[1] == name)
-            {
-                return parts[0].ToLowerInvariant();
-            }
-        }
-        throw new SendScoreException($"checksums.txt does not list {name}", 0);
     }
 
     // One file, by its exact name, so no path in the archive is ever used.
@@ -131,20 +197,18 @@ public static class Binary
     }
 
     /// <summary>
-    /// Downloads a release into dir, and returns the binary's path. The archive is checked against
-    /// checksums.txt before anything is extracted, so a binary that does not match never reaches the disk.
+    /// Downloads a release into dir, and returns the binary's path. The archive must match its pin
+    /// before anything is extracted, and the binary must match its pin before it reaches the disk.
     /// </summary>
-    internal static async Task<string> DownloadAsync(string version, string baseUrl, string dir, (string Os, string Arch) target, CancellationToken cancel = default)
+    internal static async Task<string> DownloadAsync(string version, string baseUrl, string dir, (string Archive, string Binary) pin, (string Os, string Arch) target, CancellationToken cancel = default)
     {
         var exe = Exe(target.Os);
         var ext = target.Os == "windows" ? "zip" : "tar.gz";
         var name = $"sendscore_{version}_{target.Os}_{target.Arch}.{ext}";
-        var checksums = Encoding.UTF8.GetString(await FetchAsync($"{baseUrl}/checksums.txt", cancel).ConfigureAwait(false));
         var archive = await FetchAsync($"{baseUrl}/{name}", cancel).ConfigureAwait(false);
-        var actual = Convert.ToHexString(SHA256.HashData(archive)).ToLowerInvariant();
-        if (actual != ExpectedHash(checksums, name))
+        if (Hash(archive) != pin.Archive)
         {
-            throw new SendScoreException($"{name} does not match checksums.txt", 0);
+            throw new SendScoreException($"{name} does not match its pinned hash", 0);
         }
         byte[]? binary;
         try
@@ -159,22 +223,33 @@ public static class Binary
         {
             throw new SendScoreException($"{name} has no {exe}", 0);
         }
-        Directory.CreateDirectory(dir);
-        var temp = Path.Combine(dir, $".download-{Guid.NewGuid():N}");
+        if (Hash(binary) != pin.Binary)
+        {
+            throw new SendScoreException($"the binary in {name} does not match its pinned hash", 0);
+        }
         try
         {
-            await File.WriteAllBytesAsync(temp, binary, cancel).ConfigureAwait(false);
-            if (!OperatingSystem.IsWindows())
+            Directory.CreateDirectory(dir);
+            var temp = Path.Combine(dir, $".download-{Guid.NewGuid():N}");
+            try
             {
-                File.SetUnixFileMode(temp, (UnixFileMode)0b111_101_101);
+                await File.WriteAllBytesAsync(temp, binary, cancel).ConfigureAwait(false);
+                if (!OperatingSystem.IsWindows())
+                {
+                    File.SetUnixFileMode(temp, (UnixFileMode)0b111_101_101);
+                }
+                var path = Path.Combine(dir, exe);
+                File.Move(temp, path, overwrite: true);
+                return path;
             }
-            var path = Path.Combine(dir, exe);
-            File.Move(temp, path, overwrite: true);
-            return path;
+            finally
+            {
+                File.Delete(temp);
+            }
         }
-        finally
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            File.Delete(temp);
+            throw new SendScoreException($"could not write to {dir}: {e.Message}", 0);
         }
     }
 }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using Xunit;
 
 namespace SendScore.Tests;
@@ -48,6 +49,15 @@ public class DownloadTests : IDisposable
         });
     }
 
+    private static readonly (string Os, string Arch) Linux = ("linux", "amd64");
+
+    private static (string Archive, string Binary) Pin(string os, string arch)
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(Fixtures(), "pins.json")));
+        var entry = doc.RootElement.GetProperty($"{os}_{arch}");
+        return (entry.GetProperty("archive").GetString()!, entry.GetProperty("binary").GetString()!);
+    }
+
     private static string Fixtures()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -71,7 +81,7 @@ public class DownloadTests : IDisposable
     public async Task InstallsTheBinaryAndNothingElse(string os, string arch)
     {
         var cache = Path.Combine(_tmp, "cache");
-        var path = await Binary.DownloadAsync("0.0.0-test", $"{_base}/good", cache, (os, arch));
+        var path = await Binary.DownloadAsync("0.0.0-test", $"{_base}/good", cache, Pin(os, arch), (os, arch));
         Assert.Contains("fake sendscore", await File.ReadAllTextAsync(path));
         Assert.Equal(new[] { Path.GetFileName(path) }, Directory.GetFileSystemEntries(cache).Select(Path.GetFileName));
         Assert.False(File.Exists(Path.Combine(_tmp, "evil")));
@@ -81,7 +91,7 @@ public class DownloadTests : IDisposable
     public async Task RefusesAMismatch()
     {
         var cache = Path.Combine(_tmp, "cache");
-        await Assert.ThrowsAsync<SendScoreException>(() => Binary.DownloadAsync("0.0.0-test", $"{_base}/tampered", cache, ("linux", "amd64")));
+        await Assert.ThrowsAsync<SendScoreException>(() => Binary.DownloadAsync("0.0.0-test", $"{_base}/altered", cache, Pin("linux", "amd64"), Linux));
         Assert.False(Directory.Exists(cache));
     }
 
@@ -89,6 +99,31 @@ public class DownloadTests : IDisposable
     public async Task FailsOnAMissingRelease()
     {
         var cache = Path.Combine(_tmp, "cache");
-        await Assert.ThrowsAsync<SendScoreException>(() => Binary.DownloadAsync("0.0.0-test", $"{_base}/nothing", cache, ("linux", "amd64")));
+        await Assert.ThrowsAsync<SendScoreException>(() => Binary.DownloadAsync("0.0.0-test", $"{_base}/nothing", cache, Pin("linux", "amd64"), Linux));
+    }
+
+    [Fact]
+    public async Task RefusesABinaryThatDoesNotMatch()
+    {
+        var cache = Path.Combine(_tmp, "cache");
+        var wrong = (Pin("linux", "amd64").Archive, new string('0', 64));
+        await Assert.ThrowsAsync<SendScoreException>(() => Binary.DownloadAsync("0.0.0-test", $"{_base}/good", cache, wrong, Linux));
+        Assert.False(Directory.Exists(cache));
+    }
+
+    [Fact]
+    public async Task ACachedBinaryIsTrustedOnlyWhileItMatches()
+    {
+        var pin = Pin("linux", "amd64");
+        var path = await Binary.DownloadAsync("0.0.0-test", $"{_base}/good", Path.Combine(_tmp, "cache"), pin, Linux);
+        Assert.True(Binary.MatchesPin(path, pin));
+        await File.WriteAllTextAsync(path, "planted");
+        Assert.False(Binary.MatchesPin(path, pin));
+    }
+
+    [Fact]
+    public void NoPinMeansNoDownload()
+    {
+        Assert.Throws<SendScoreException>(() => Binary.PinFor(Linux, new()));
     }
 }
