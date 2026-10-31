@@ -3,10 +3,15 @@ package engine
 import (
 	"fmt"
 	"net/textproto"
+	"net/url"
 	"strings"
 
 	"github.com/sendscore/sendscore/verdict"
 )
+
+// maxListURIs bounds the List-Unsubscribe URIs compared with every link in
+// the message. Real headers carry one or two.
+const maxListURIs = 20
 
 // listUnsubURIs returns the URIs in every List-Unsubscribe header, in order.
 // RFC 2369 encloses each in angle brackets, so a comma inside one is part of
@@ -17,7 +22,22 @@ func (r *run) listUnsubURIs() []string {
 	for _, h := range r.msg.Header[textproto.CanonicalMIMEHeaderKey("List-Unsubscribe")] {
 		out = append(out, parseListURIs(h)...)
 	}
-	return out
+	return out[:min(len(out), maxListURIs)]
+}
+
+// validUnsubURL reports whether u is an https URL with a host and no
+// unrendered merge tag, which is what a receiver can actually post to.
+func validUnsubURL(u string) bool {
+	p, err := url.Parse(u)
+	if err != nil || !strings.EqualFold(p.Scheme, "https") || p.Hostname() == "" {
+		return false
+	}
+	for _, t := range placeholderPatterns {
+		if t.re.MatchString(u) {
+			return false
+		}
+	}
+	return true
 }
 
 // lastHeader returns the last instance of a header and how many there are.
@@ -65,7 +85,7 @@ func (r *run) unsubscribe() {
 	mailto, http := false, false
 	for _, u := range uris {
 		l := strings.ToLower(u)
-		if strings.HasPrefix(l, "https:") && https == "" {
+		if strings.HasPrefix(l, "https:") && https == "" && validUnsubURL(u) {
 			https = u
 		}
 		if strings.HasPrefix(l, "mailto:") {
@@ -170,6 +190,13 @@ func (r *run) checkUnsubSigned(hasHeader, hasPost bool) {
 				Evidence: map[string]any{"signed_by": d.Domain},
 				Docs:     docsRFC8058,
 			})
+			return
+		}
+	}
+	// A signature that could not be verified may be the one that covers them.
+	for _, d := range r.dkim {
+		if d.Result == "temperror" || d.ExpiredAfterReceipt {
+			r.add(skipped("unsub.signed", verdict.Unsub, "Unsubscribe signing not checked", "A DKIM signature that might cover the unsubscribe headers could not be verified."))
 			return
 		}
 	}

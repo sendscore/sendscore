@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"net/textproto"
 	"net/url"
 	"regexp"
 	"sort"
@@ -18,6 +19,10 @@ type link struct {
 	Text string
 	// Words is the link's own text, without alt text.
 	Words string
+	// Context is the text just around the link, in the same block or on
+	// the same line. "To unsubscribe, click here" says what a link does
+	// only there.
+	Context string
 }
 
 type image struct {
@@ -34,6 +39,11 @@ const (
 	maxImagesExamined = 2000
 	maxEvidenceItems  = 20
 	maxLinkHosts      = 200
+	// maxDistinctTags bounds the merge tag candidates looked at, since each
+	// new one may be searched for in the code samples.
+	maxDistinctTags = 200
+	// contextBytes is how much text around a link says what the link does.
+	contextBytes = 60
 )
 
 type parsedHTML struct {
@@ -180,7 +190,24 @@ func parseHTML(s string) *parsedHTML {
 			p.Active = append(p.Active, name)
 		}
 	}
+	// lastLink is the index of a link just closed in this block, whose
+	// context still needs the text after it, or -1.
+	lastLink := -1
+	closeLink := func() {
+		if open == nil {
+			return
+		}
+		open.Text = collapse(linkText.String())
+		open.Words = collapse(words.String())
+		p.LinksTotal++
+		if len(p.Links) < maxLinksExamined {
+			p.Links = append(p.Links, *open)
+			lastLink = len(p.Links) - 1
+		}
+		open = nil
+	}
 	endBlock := func() {
+		lastLink = -1
 		b := collapse(block.String())
 		block.Reset()
 		if b != "" {
@@ -204,6 +231,7 @@ func parseHTML(s string) *parsedHTML {
 		tt := z.Next()
 		switch tt {
 		case html.ErrorToken:
+			closeLink()
 			endBlock()
 			p.Text = collapse(text.String())
 			p.Prose = collapse(prose.String())
@@ -232,9 +260,11 @@ func parseHTML(s string) *parsedHTML {
 					skip++
 				}
 			case "a":
+				// Mail clients close an open link at the next one.
+				closeLink()
 				if href := attr(t, "href"); href != nil {
 					addAttr(href)
-					open = &link{Href: strings.TrimSpace(*href)}
+					open = &link{Href: strings.TrimSpace(*href), Context: lastBytes(block.String(), contextBytes)}
 					linkText.Reset()
 					words.Reset()
 				}
@@ -285,6 +315,9 @@ func parseHTML(s string) *parsedHTML {
 			if open != nil {
 				linkText.Write(t)
 				words.Write(t)
+			} else if lastLink >= 0 {
+				p.Links[lastLink].Context += " " + string(t[:min(len(t), contextBytes)])
+				lastLink = -1
 			}
 		case html.EndTagToken:
 			name, _ := z.TagName()
@@ -304,18 +337,15 @@ func parseHTML(s string) *parsedHTML {
 					skip--
 				}
 			case "a":
-				if open != nil {
-					open.Text = collapse(linkText.String())
-					open.Words = collapse(words.String())
-					p.LinksTotal++
-					if len(p.Links) < maxLinksExamined {
-						p.Links = append(p.Links, *open)
-					}
-					open = nil
-				}
+				closeLink()
 			}
 		}
 	}
+}
+
+// lastBytes returns at most the last n bytes of s.
+func lastBytes(s string, n int) string {
+	return s[max(0, len(s)-n):]
 }
 
 // imageSize reports whether an image is a tracking pixel (sized 0 or 1 in
@@ -395,10 +425,10 @@ func (r *run) content() {
 		r.parsed = parseHTML(r.msg.HTML)
 	} else {
 		r.parsed = &parsedHTML{}
-		for _, u := range textURL.FindAllString(r.msg.Text, -1) {
+		for _, m := range textURL.FindAllStringIndex(r.msg.Text, -1) {
 			r.parsed.LinksTotal++
 			if len(r.parsed.Links) < maxLinksExamined {
-				r.parsed.Links = append(r.parsed.Links, link{Href: trimURL(u)})
+				r.parsed.Links = append(r.parsed.Links, link{Href: trimURL(r.msg.Text[m[0]:m[1]]), Context: lineAround(r.msg.Text, m[0], m[1])})
 			}
 		}
 	}
@@ -435,6 +465,8 @@ func (r *run) content() {
 		{"content.active", "Active content not checked", r.checkActiveContent},
 		{"content.blocklists", "Link domains not looked up", r.checkBlocklists},
 	}
+	start := len(r.checks)
+	defer func() { r.skipUnread(start) }()
 	for _, c := range checks {
 		if r.ctx.Err() != nil {
 			cat := verdict.Content
@@ -452,6 +484,38 @@ func (r *run) content() {
 		return
 	}
 	r.checkLinks()
+}
+
+// skipUnread turns the results from index start on into skipped when the
+// message body could not be read in full, since a pass, or a warning that
+// something is missing, says nothing about the part that was lost. What was
+// found in the part that was read still stands.
+func (r *run) skipUnread(start int) {
+	if !r.msg.BodyIncomplete {
+		return
+	}
+	for i := start; i < len(r.checks); i++ {
+		c := &r.checks[i]
+		absent := c.Status == verdict.Warn && (c.ID == "unsub.visible" || c.ID == "content.preheader" || c.ID == "content.text_ratio")
+		if c.ID == "content.subject" || (c.Status != verdict.Pass && c.Status != verdict.Info && !absent) {
+			continue
+		}
+		*c = skipped(c.ID, c.Category, "Not checked: the body could not be read", "Part of the message body could not be read. See struct.mime.")
+	}
+}
+
+// lineAround returns the line holding s[start:end], cut to contextBytes on
+// each side of it.
+func lineAround(s string, start, end int) string {
+	before := lastBytes(s[:start], contextBytes)
+	if i := strings.LastIndexByte(before, '\n'); i >= 0 {
+		before = before[i+1:]
+	}
+	after := s[end:min(len(s), end+contextBytes)]
+	if i := strings.IndexByte(after, '\n'); i >= 0 {
+		after = after[:i]
+	}
+	return before + " " + after
 }
 
 // capped puts items in the evidence under key, keeping at most
@@ -495,7 +559,11 @@ func (r *run) partial(c verdict.Check) verdict.Check {
 
 func (r *run) checkPlaceholders() {
 	var found []string
+	limited := false
 	seen := map[string]bool{}
+	// inCode remembers the tags found in the HTML's code samples, so each
+	// is searched for once.
+	inCode := map[string]bool{}
 	total := 0
 	// The plain text part repeats the HTML's code samples without marking
 	// them, so a tag there that also appears in an HTML code sample is
@@ -505,16 +573,30 @@ func (r *run) checkPlaceholders() {
 		skipCode bool
 	}{
 		{r.msg.get("Subject"), false}, {r.msg.Text, true}, {r.parsed.Prose, false}, {r.parsed.Attrs, false},
+		{strings.Join(r.msg.Header[textproto.CanonicalMIMEHeaderKey("List-Unsubscribe")], "\n"), false},
 	}
 	if r.msg.HTML == "" {
 		bodies[2].text = r.parsed.Text
 	}
+scan:
 	for _, body := range bodies {
 		for _, p := range placeholderPatterns {
 			for _, m := range p.re.FindAllStringSubmatchIndex(body.text, -1) {
 				start, end := m[2*p.group], m[2*p.group+1]
 				tag := body.text[start:end]
-				if seen[tag] || inFString(body.text, start) || (body.skipCode && strings.Contains(r.parsed.Code, tag)) {
+				if seen[tag] || inCode[tag] || inFString(body.text, start) {
+					continue
+				}
+				if r.ctx.Err() != nil {
+					r.add(skipped("content.placeholders", verdict.Content, "Merge tags not checked", "The check was stopped before it finished."))
+					return
+				}
+				if len(seen)+len(inCode) >= maxDistinctTags {
+					limited = true
+					break scan
+				}
+				if body.skipCode && strings.Contains(r.parsed.Code, tag) {
+					inCode[tag] = true
 					continue
 				}
 				seen[tag] = true
@@ -526,12 +608,19 @@ func (r *run) checkPlaceholders() {
 		}
 	}
 	if len(found) == 0 {
-		r.add(verdict.Check{ID: "content.placeholders", Category: verdict.Content, Status: verdict.Pass, Title: "No unrendered merge tags"})
+		c := verdict.Check{ID: "content.placeholders", Category: verdict.Content, Status: verdict.Pass, Title: "No unrendered merge tags"}
+		if limited {
+			c.Status, c.Title = verdict.Info, fmt.Sprintf("No unrendered merge tags in the first %d candidates", maxDistinctTags)
+		}
+		r.add(c)
 		return
 	}
 	ev := map[string]any{"found": found}
 	if total > len(found) {
 		ev["found_total"] = total
+	}
+	if limited {
+		ev["stopped_at"] = maxDistinctTags
 	}
 	r.add(verdict.Check{
 		ID: "content.placeholders", Category: verdict.Content, Status: verdict.Fail,
@@ -547,8 +636,8 @@ func inFString(s string, i int) bool {
 	if i == 0 || s[i] != '{' {
 		return false
 	}
-	lineStart := max(strings.LastIndexByte(s[:i], '\n')+1, i-80)
-	line := s[lineStart:i]
+	line := s[max(0, i-80):i]
+	line = line[strings.LastIndexByte(line, '\n')+1:]
 	for _, q := range []string{`"`, "'"} {
 		for _, prefix := range []string{"f", "F", "rf", "fr", "Rf", "fR"} {
 			open := strings.LastIndex(line, prefix+q)
