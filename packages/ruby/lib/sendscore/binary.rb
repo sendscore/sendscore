@@ -176,8 +176,8 @@ module SendScore
     end
 
     def install(binary, dir, exe)
-      FileUtils.mkdir_p(dir)
       path = File.join(dir, exe)
+      FileUtils.mkdir_p(dir)
       # Unique per call, so threads and processes never share a partial file.
       temp = "#{path}.#{Process.pid}.#{SecureRandom.hex(8)}.download"
       begin
@@ -189,6 +189,10 @@ module SendScore
       end
       path
     rescue SystemCallError => e
+      # On Windows a rename fails while another caller is installing the same
+      # file, and that caller's copy is exactly what this one would have left.
+      return path if path && File.file?(path) && File.binread(path) == binary
+
       raise Error.new("could not write to #{dir}: #{e.message}", 0)
     end
   end
