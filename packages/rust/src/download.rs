@@ -240,16 +240,19 @@ pub fn download(version: &str, base: &str, dir: &Path, os: &str, arch: &str, pin
             fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
         }
         let path = dir.join(exe);
-        fs::rename(&temp, &path)?;
+        // On Windows a rename fails while another caller holds the target open.
+        let mut attempts = 40;
+        while let Err(e) = fs::rename(&temp, &path) {
+            attempts -= 1;
+            if attempts == 0 {
+                return Err(e);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Ok(path)
     })();
     if installed.is_err() {
         let _ = fs::remove_file(&temp);
-        // On Windows a rename fails while another caller is installing the
-        // same file, and that caller's copy is what this one would have left.
-        if fs::read(dir.join(exe)).is_ok_and(|bytes| bytes == binary) {
-            return Ok(dir.join(exe));
-        }
     }
     installed.map_err(write)
 }
