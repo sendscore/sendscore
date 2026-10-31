@@ -1,4 +1,5 @@
-use sendscore::download_release;
+use sendscore::{download_release, matches_pin, Pin};
+use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -6,6 +7,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
+
+fn pins() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/release/pins.json");
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn pin<'a>(pins: &'a Value, os: &str, arch: &str) -> Pin<'a> {
+    let entry = &pins[format!("{os}_{arch}")];
+    Pin { archive: entry["archive"].as_str().unwrap(), binary: entry["binary"].as_str().unwrap() }
+}
 
 fn serve() -> String {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../conformance/release");
@@ -46,10 +57,11 @@ fn names(dir: &Path) -> Vec<String> {
 #[test]
 fn installs_the_binary_and_nothing_else() {
     let base = serve();
+    let pins = pins();
     for (os, arch) in [("linux", "amd64"), ("darwin", "arm64"), ("windows", "amd64")] {
         let tmp = tmp();
         let cache = tmp.join("cache");
-        let path = download_release("0.0.0-test", &format!("{base}/good"), &cache, os, arch).unwrap();
+        let path = download_release("0.0.0-test", &format!("{base}/good"), &cache, os, arch, pin(&pins, os, arch)).unwrap();
         assert!(String::from_utf8_lossy(&fs::read(&path).unwrap()).contains("fake sendscore"));
         assert_eq!(names(&cache), vec![path.file_name().unwrap().to_string_lossy().into_owned()]);
         assert!(!tmp.join("evil").exists());
@@ -60,7 +72,7 @@ fn installs_the_binary_and_nothing_else() {
 fn refuses_a_mismatch() {
     let base = serve();
     let cache = tmp().join("cache");
-    assert!(download_release("0.0.0-test", &format!("{base}/tampered"), &cache, "linux", "amd64").is_err());
+    assert!(download_release("0.0.0-test", &format!("{base}/altered"), &cache, "linux", "amd64", pin(&pins(), "linux", "amd64")).is_err());
     assert!(!cache.exists());
 }
 
@@ -68,5 +80,45 @@ fn refuses_a_mismatch() {
 fn fails_on_a_missing_release() {
     let base = serve();
     let cache = tmp().join("cache");
-    assert!(download_release("0.0.0-test", &format!("{base}/nothing"), &cache, "linux", "amd64").is_err());
+    assert!(download_release("0.0.0-test", &format!("{base}/nothing"), &cache, "linux", "amd64", pin(&pins(), "linux", "amd64")).is_err());
+}
+
+#[test]
+fn refuses_a_binary_that_does_not_match() {
+    let base = serve();
+    let pins = pins();
+    let cache = tmp().join("cache");
+    let wrong = Pin { binary: "00", ..pin(&pins, "linux", "amd64") };
+    assert!(download_release("0.0.0-test", &format!("{base}/good"), &cache, "linux", "amd64", wrong).is_err());
+    assert!(!cache.exists());
+}
+
+#[test]
+fn cached_binary_is_trusted_only_while_it_matches() {
+    let base = serve();
+    let pins = pins();
+    let p = pin(&pins, "linux", "amd64");
+    let path = download_release("0.0.0-test", &format!("{base}/good"), &tmp().join("cache"), "linux", "amd64", p).unwrap();
+    assert!(matches_pin(&path, p));
+    fs::write(&path, "planted").unwrap();
+    assert!(!matches_pin(&path, p));
+}
+
+#[test]
+fn concurrent_first_downloads_all_succeed() {
+    let base = serve();
+    let pins = pins();
+    let cache = tmp().join("cache");
+    std::thread::scope(|s| {
+        let joined: Vec<_> = (0..8)
+            .map(|_| {
+                let (base, cache, pins) = (&base, &cache, &pins);
+                s.spawn(move || download_release("0.0.0-test", &format!("{base}/good"), cache, "linux", "amd64", pin(pins, "linux", "amd64")))
+            })
+            .collect();
+        for j in joined {
+            j.join().unwrap().unwrap();
+        }
+    });
+    assert_eq!(names(&cache), vec!["sendscore".to_string()]);
 }

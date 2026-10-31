@@ -39,7 +39,10 @@ fn conformance() {
         if c["command"] == "diff" {
             let got = diff(root.join(c["before"].as_str().unwrap()), root.join(c["after"].as_str().unwrap()));
             match got {
-                Err(e) => assert_eq!(i64::from(e.exit_code), exit, "{name}"),
+                Err(e) => {
+                    assert!(exit > 2, "{name}: {e}");
+                    assert_eq!(i64::from(e.exit_code), exit, "{name}");
+                }
                 Ok(d) => {
                     assert!(exit <= 2, "{name}");
                     assert_eq!(d.changes.iter().map(|x| x.field.clone()).collect::<Vec<_>>(), list(c, "changes"), "{name}");
@@ -67,7 +70,10 @@ fn conformance() {
             Input::Path(&path)
         };
         match check(input, &opts) {
-            Err(e) => assert_eq!(i64::from(e.exit_code), exit, "{name}"),
+            Err(e) => {
+                assert!(exit > 2, "{name}: {e}");
+                assert_eq!(i64::from(e.exit_code), exit, "{name}");
+            }
             Ok(v) => {
                 assert!(exit <= 2, "{name}");
                 assert_eq!(status_name(v.verdict), c["verdict"].as_str().unwrap(), "{name}");

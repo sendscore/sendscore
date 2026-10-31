@@ -2,7 +2,7 @@
 name = "sendscore"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 description = "Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI."
 license = "MIT"
 repository = "https://github.com/sendscore/sendscore"
