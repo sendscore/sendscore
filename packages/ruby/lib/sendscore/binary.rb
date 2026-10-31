@@ -183,17 +183,23 @@ module SendScore
       begin
         File.binwrite(temp, binary)
         File.chmod(0o755, temp)
-        File.rename(temp, path)
+        replace(temp, path)
       ensure
         FileUtils.rm_f(temp)
       end
       path
     rescue SystemCallError => e
-      # On Windows a rename fails while another caller is installing the same
-      # file, and that caller's copy is exactly what this one would have left.
-      return path if path && File.file?(path) && File.binread(path) == binary
-
       raise Error.new("could not write to #{dir}: #{e.message}", 0)
+    end
+
+    # On Windows a rename fails while another caller holds the target open.
+    def replace(temp, path, attempts = 40)
+      File.rename(temp, path)
+    rescue SystemCallError
+      raise if attempts <= 1
+
+      sleep(0.05)
+      replace(temp, path, attempts - 1)
     end
   end
 end
