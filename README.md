@@ -58,7 +58,7 @@ Messages sent to a SendScore address carry all of it.
 
 Other flags:
 
-- `--links` fetches every link and image. Off by default: it is slow, and it touches your tracking links. Unsubscribe, confirm, and preference links are never fetched, and private and loopback addresses are refused.
+- `--links` fetches every link and image. Off by default: it is slow, and it touches your tracking links. Unsubscribe, confirm, verify, and preference links are never fetched, and neither is a tracked link whose text says nothing about it. Private and loopback addresses are refused.
 - `--offline` makes no DNS lookups. Checks that need DNS are skipped, not failed, and that includes `--links`.
 
 Exit codes:
