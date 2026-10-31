@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sendscore"
+version = "0.2.0"
+description = "Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/sendscore/sendscore"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sendscore"]
