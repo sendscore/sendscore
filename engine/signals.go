@@ -215,15 +215,33 @@ func (s *set) add(v string) {
 // destination in the text and go through the tracker, which is expected.
 var trackingSuffixes = []string{
 	"list-manage.com", "mcusercontent.com", "convertkit-mail.com", "convertkit-mail2.com",
-	"ck.page", "kit.com", "beehiiv.com", "mlsend.com", "mailerlite.com", "sendgrid.net",
-	"mailgun.org", "rs6.net", "hubspotlinks.com", "substack.com", "buttondown.email",
-	"ghost.io", "klclick.com", "klclick1.com", "ct.sendgrid.net", "awstrack.me",
+	"ck.page", "mlsend.com", "mailerlite.com", "sendgrid.net",
+	"mailgun.org", "rs6.net", "hubspotlinks.com", "buttondown.email",
+	"klclick.com", "klclick1.com", "ct.sendgrid.net", "awstrack.me",
 }
 
-func isTracker(host string) bool {
+// Platforms where anyone can claim a name, as in evil.ghost.io. Only their
+// own click hosts count: a redirect path on the bare domain, or a host more
+// than one label deep, such as link.mail.beehiiv.com.
+var publishingHosts = []string{"ghost.io", "substack.com", "beehiiv.com", "kit.com"}
+
+func isTrackerLink(href string) bool {
+	u, err := url.Parse(strings.TrimSpace(href))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
 	for _, t := range trackingSuffixes {
 		if host == t || strings.HasSuffix(host, "."+t) {
 			return true
+		}
+	}
+	for _, t := range publishingHosts {
+		if host == t {
+			return trackingPath.MatchString(u.EscapedPath())
+		}
+		if sub, ok := strings.CutSuffix(host, "."+t); ok {
+			return strings.Contains(sub, ".")
 		}
 	}
 	return false
@@ -258,22 +276,41 @@ func (r *run) ownTracker(href string) bool {
 	return trackingLabel.MatchString(first) || trackingPath.MatchString(u.EscapedPath())
 }
 
+// senderDomain reports whether an organizational domain sent this message,
+// going by the From and Return-Path domains and the valid DKIM signatures.
+func (r *run) senderDomain(org string) bool {
+	if org == orgDomain(r.fromDom) || org == orgDomain(r.spfDom) {
+		return true
+	}
+	for _, d := range r.dkim {
+		if d.Result == "pass" && org == orgDomain(d.Domain) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkLinkTextMismatch flags a link whose own text is a web address on one
 // domain while the link goes to another. Links through a known click
 // tracking host are allowed, and so are links through the issue's own
-// tracking domain, recognised as the one domain carrying at least three
-// links and more than half of them, or as a tracking subdomain of the
-// sender's own domain. Every rule is deterministic.
+// tracking domain, recognised as a tracking subdomain of the sender's own
+// domain, or as the one domain carrying at least three links and more than
+// half of them, when the message's From, Return-Path, or a valid DKIM
+// signature names that domain, or all those links use a tracking host name
+// such as click.example.net. Every rule is deterministic.
 func (r *run) checkLinkTextMismatch() {
-	counts := map[string]int{}
+	counts, labeled := map[string]int{}, map[string]int{}
 	for _, l := range r.parsed.Links {
 		if h := linkHost(l.Href); h != "" {
 			counts[orgDomain(h)]++
+			if first, _, _ := strings.Cut(h, "."); h != orgDomain(h) && trackingLabel.MatchString(first) {
+				labeled[orgDomain(h)]++
+			}
 		}
 	}
 	tracker := ""
 	for h, n := range counts {
-		if n >= 3 && n*2 > len(r.parsed.Links) {
+		if n >= 3 && n*2 > len(r.parsed.Links) && (labeled[h] == n || r.senderDomain(h)) {
 			tracker = h // at most one domain can hold more than half
 		}
 	}
@@ -284,7 +321,7 @@ func (r *run) checkLinkTextMismatch() {
 		if shown == "" || target == "" {
 			continue
 		}
-		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker || isTracker(target) || r.ownTracker(l.Href) {
+		if orgDomain(shown) == orgDomain(target) || orgDomain(target) == tracker || isTrackerLink(l.Href) || r.ownTracker(l.Href) {
 			continue
 		}
 		bad = append(bad, map[string]string{"text": l.Words, "href": l.Href})

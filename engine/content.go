@@ -23,6 +23,10 @@ type link struct {
 	// the same line. "To unsubscribe, click here" says what a link does
 	// only there.
 	Context string
+	// Label is the link's aria-label and title, and Nearby is the block or
+	// line before it. Both only help avoid following action links; Nearby
+	// counts only for a link whose own text says nothing.
+	Label, Nearby string
 }
 
 type image struct {
@@ -206,12 +210,14 @@ func parseHTML(s string) *parsedHTML {
 		}
 		open = nil
 	}
+	prevBlock := ""
 	endBlock := func() {
 		lastLink = -1
 		b := collapse(block.String())
 		block.Reset()
 		if b != "" {
 			blocks = append(blocks, b)
+			prevBlock = b
 		}
 	}
 	addAttr := func(v *string) {
@@ -264,7 +270,12 @@ func parseHTML(s string) *parsedHTML {
 				closeLink()
 				if href := attr(t, "href"); href != nil {
 					addAttr(href)
-					open = &link{Href: strings.TrimSpace(*href), Context: lastBytes(block.String(), contextBytes)}
+					open = &link{Href: strings.TrimSpace(*href), Context: lastBytes(block.String(), contextBytes), Nearby: lastBytes(prevBlock, contextBytes)}
+					for _, name := range []string{"aria-label", "title"} {
+						if v := attr(t, name); v != nil {
+							open.Label += " " + lastBytes(*v, contextBytes)
+						}
+					}
 					linkText.Reset()
 					words.Reset()
 				}
@@ -428,7 +439,7 @@ func (r *run) content() {
 		for _, m := range textURL.FindAllStringIndex(r.msg.Text, -1) {
 			r.parsed.LinksTotal++
 			if len(r.parsed.Links) < maxLinksExamined {
-				r.parsed.Links = append(r.parsed.Links, link{Href: trimURL(r.msg.Text[m[0]:m[1]]), Context: lineAround(r.msg.Text, m[0], m[1])})
+				r.parsed.Links = append(r.parsed.Links, link{Href: trimURL(r.msg.Text[m[0]:m[1]]), Context: lineAround(r.msg.Text, m[0], m[1]), Nearby: lineBefore(r.msg.Text, m[0])})
 			}
 		}
 	}
@@ -506,6 +517,17 @@ func (r *run) skipUnread(start int) {
 
 // lineAround returns the line holding s[start:end], cut to contextBytes on
 // each side of it.
+// lineBefore returns the last line with text before the line holding start.
+func lineBefore(s string, start int) string {
+	head := s[max(0, start-2048):start]
+	i := strings.LastIndexByte(head, '\n')
+	if i < 0 {
+		return ""
+	}
+	head = strings.TrimRight(head[:i], " \t\r\n")
+	return lastBytes(head[strings.LastIndexByte(head, '\n')+1:], contextBytes)
+}
+
 func lineAround(s string, start, end int) string {
 	before := lastBytes(s[:start], contextBytes)
 	if i := strings.LastIndexByte(before, '\n'); i >= 0 {

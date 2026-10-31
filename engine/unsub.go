@@ -214,7 +214,7 @@ func (r *run) checkVisibleUnsub() {
 	found := ""
 	if r.parsed != nil {
 		for _, l := range r.parsed.Links {
-			t := strings.ToLower(l.Text + " " + l.Href)
+			t := strings.ToLower(l.Text + " " + l.Href + " " + l.Context)
 			if strings.Contains(t, "unsubscribe") || strings.Contains(t, "opt out") || strings.Contains(t, "opt-out") {
 				found = l.Href
 				break

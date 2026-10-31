@@ -31,10 +31,15 @@ const (
 // Words in a URL that mean following it does something to a subscription.
 // These are never fetched: a GET on some platforms' links is the action.
 var actionWords = []string{
-	"unsubscribe", "unsub", "optout", "opt-out", "opt_out", "remove",
-	"confirm", "preferences", "manage", "subscription", "list-manage.com/profile",
-	"disable_email",
+	"subscribe", "unsub", "optout", "remove", "confirm", "preference", "prefs",
+	"verify", "verification", "activate", "manage", "subscription",
+	"list-manage.com/profile", "disableemail", "emailsettings", "settingsemail",
+	"mailsettings", "settingsmail",
 }
+
+// actionNormal drops the separators that a URL may put inside an action word,
+// as in un-subscribe, opt_out, or settings/email.
+var actionNormal = strings.NewReplacer("-", "", "_", "", "/", "", "+", "")
 
 // Unsubscribe words in other languages. They are matched in a URL's path
 // and query only, so a host name that happens to contain one is not
@@ -72,6 +77,7 @@ func isActionLink(u string, listUnsub []string) bool {
 			return true
 		}
 	}
+	l += " " + actionNormal.Replace(l)
 	for _, w := range actionWords {
 		if strings.Contains(l, w) {
 			return true
@@ -117,9 +123,10 @@ func sameEndpoint(link, listUnsub string) bool {
 // a subscription. Click tracking often hides the real URL, so the text is
 // the only sign.
 var actionTextWords = []string{
-	"unsubscribe", "unsub", "opt out", "opt-out", "optout", "preferences", "preference center",
-	"manage subscription", "manage your subscription", "manage subscriptions", "subscription settings",
-	"email settings", "update your profile", "confirm", "remove me", "stop receiving",
+	"unsubscribe", "unsub", "un-subscribe", "un subscribe", "resubscribe", "opt out", "opt-out", "optout",
+	"preference", "manage subscription", "manage your subscription", "manage subscriptions",
+	"subscription settings", "email settings", "update your profile", "confirm", "verify", "activate",
+	"remove me", "stop receiving",
 	// Other languages.
 	"abbestellen", "abmelden", "austragen", "désabonner", "desabonner", "désinscri", "desinscri",
 	"se désinscrire", "darse de baja", "dar de baja", "cancelar suscripción", "cancelar la suscripción",
@@ -127,6 +134,31 @@ var actionTextWords = []string{
 	"annulla iscrizione", "annulla l'iscrizione", "descadastrar", "cancelar inscrição",
 	"cancelar subscrição", "avregistrera", "avsluta prenumeration", "afmeld", "avmeld", "odhlásit",
 	"wypisz", "rezygnacja", "leiratkozás", "peruuta tilaus",
+}
+
+// unclearText reports whether a link's own text says nothing about where it
+// goes, as with "click here" or an image with no alt text.
+func unclearText(text string) bool {
+	switch strings.ToLower(strings.TrimRight(strings.TrimSpace(text), ".!:>\u2192 ")) {
+	case "", "here", "click", "click here", "tap", "tap here", "this", "this link", "link", "go", "open":
+		return true
+	}
+	return false
+}
+
+// trackedLink reports whether a URL goes through a click tracker, which hides
+// the real destination. Checking one with unclear text is not worth the risk:
+// a missed link check costs far less than triggering an unsubscribe.
+func (r *run) trackedLink(href string) bool {
+	if isTrackerLink(href) || r.ownTracker(href) {
+		return true
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return false
+	}
+	first, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+	return trackingLabel.MatchString(first) && trackingPath.MatchString(u.EscapedPath())
 }
 
 func isActionText(text string) bool {
@@ -144,6 +176,11 @@ func isActionText(text string) bool {
 // checker's own network. It never follows a redirect into an unsubscribe,
 // confirm, or preferences URL. Each call has its own transport; call
 // CloseIdleConnections on the client when done with it.
+//
+// It resolves names through the system, not engine.Resolver, on purpose: the
+// address check runs on the address the dialer actually connects to, which
+// is what stops DNS rebinding. For the same reason, a Resolver wrapped around
+// OfflineResolver does not turn link checks off; use CheckLinks for that.
 func SafeHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
@@ -262,7 +299,9 @@ func (r *run) checkLinks() {
 	// the text of the others.
 	action := map[string]bool{}
 	for _, l := range r.parsed.Links {
-		if isActionText(l.Text) || isActionText(l.Context) || isActionLink(l.Href, unsub) {
+		unclear := unclearText(l.Text)
+		if isActionText(l.Text) || isActionText(l.Context) || isActionText(l.Label) ||
+			isActionLink(l.Href, unsub) || (unclear && (isActionText(l.Nearby) || r.trackedLink(l.Href))) {
 			action[l.Href] = true
 		}
 	}
@@ -447,6 +486,10 @@ func inconclusive(err error) bool {
 // inconclusiveStatus reports whether a status says nothing about whether the
 // link works: the server is busy, or it does not answer robots.
 func inconclusiveStatus(code int) bool {
+	// 999 and the like are not HTTP statuses; LinkedIn sends one to robots.
+	if code >= 600 {
+		return true
+	}
 	switch code {
 	case 401, 403, 429, 502, 503, 504:
 		return true
@@ -471,8 +514,8 @@ func fetch(ctx context.Context, client *http.Client, u string) linkResult {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		res.Status, res.Error, res.Unknown = resp.StatusCode, "", inconclusiveStatus(resp.StatusCode)
-		// Many servers refuse HEAD; only a GET answer is final.
-		if method == http.MethodHead && (resp.StatusCode == 405 || resp.StatusCode == 403 || resp.StatusCode == 501 || resp.StatusCode == 404 || resp.StatusCode == 429 || resp.StatusCode == 503) {
+		// Many servers refuse or mishandle HEAD; only a GET answer is final.
+		if method == http.MethodHead && resp.StatusCode >= 400 {
 			continue
 		}
 		return res
