@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { gunzipSync, inflateRawSync } from "node:zlib";
 import { SendScoreError } from "./error.js";
+import { HASHES } from "./hashes.js";
 
 export const RELEASES = "https://github.com/sendscore/sendscore/releases/download";
+
+const MAX_DOWNLOAD = 100 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 const OS: Record<string, string> = { linux: "linux", darwin: "darwin", win32: "windows" };
 const ARCH: Record<string, string> = { x64: "amd64", arm64: "arm64" };
@@ -13,6 +17,12 @@ const ARCH: Record<string, string> = { x64: "amd64", arm64: "arm64" };
 export interface Platform {
   os: string;
   arch: string;
+}
+
+/** The SHA-256 of a release archive and of the binary inside it. */
+export interface Pin {
+  archive: string;
+  binary: string;
 }
 
 export function currentPlatform(): Platform {
@@ -27,7 +37,33 @@ export function currentPlatform(): Platform {
 export function cacheRoot(): string {
   if (process.platform === "darwin") return join(homedir(), "Library", "Caches");
   if (process.platform === "win32") return process.env["LOCALAPPDATA"] || join(homedir(), "AppData", "Local");
-  return process.env["XDG_CACHE_HOME"] || join(homedir(), ".cache");
+  const xdg = process.env["XDG_CACHE_HOME"];
+  return xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".cache");
+}
+
+/** The pin for a platform. With none, nothing may be downloaded or trusted from the cache. */
+export function pinFor(p: Platform, pins: Record<string, Pin> = HASHES): Pin {
+  const pin = pins[`${p.os}_${p.arch}`];
+  if (!pin) {
+    throw new SendScoreError(
+      `this package has no pinned hash for ${p.os}_${p.arch}, so it will not download a CLI. Install the matching sendscore on PATH, or set SENDSCORE_BIN.`,
+      0,
+    );
+  }
+  return pin;
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Whether a file exists and is exactly the pinned binary. */
+export async function matchesPin(path: string, pin: Pin): Promise<boolean> {
+  try {
+    return sha256(await readFile(path)) === pin.binary;
+  } catch {
+    return false;
+  }
 }
 
 /** The name of the release archive for a version and platform. */
@@ -36,17 +72,21 @@ export function archiveName(version: string, p: Platform): string {
 }
 
 async function fetchBytes(url: string): Promise<Buffer> {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok) throw new SendScoreError(`download of ${url} answered ${res.status}`, 0);
-  return Buffer.from(await res.arrayBuffer());
-}
-
-function expectedHash(checksums: string, name: string): string {
-  for (const line of checksums.split("\n")) {
-    const [hash, file] = line.trim().split(/\s+/);
-    if (file === name && hash) return hash.toLowerCase();
+  try {
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+    if (!res.ok || !res.body) throw new SendScoreError(`download of ${url} answered ${res.status}`, 0);
+    const parts: Uint8Array[] = [];
+    let size = 0;
+    for await (const part of res.body as unknown as AsyncIterable<Uint8Array>) {
+      size += part.length;
+      if (size > MAX_DOWNLOAD) throw new SendScoreError(`download of ${url} is too large`, 0);
+      parts.push(part);
+    }
+    return Buffer.concat(parts);
+  } catch (e) {
+    if (e instanceof SendScoreError) throw e;
+    throw new SendScoreError(`download of ${url} failed: ${(e as Error).message}`, 0);
   }
-  throw new SendScoreError(`checksums.txt does not list ${name}`, 0);
 }
 
 /** Reads one file, by its exact name, from a tar archive. Nothing else is touched. */
@@ -90,32 +130,36 @@ export function fromZip(zip: Buffer, name: string): Buffer | undefined {
 }
 
 /**
- * Downloads a release into dir, and returns the binary's path. The archive is
- * checked against checksums.txt before anything is extracted, so a binary that
- * does not match never reaches the disk.
+ * Downloads a release into dir, and returns the binary's path. The archive
+ * must match its pin before anything is extracted, and the binary must match
+ * its pin before it reaches the disk.
  */
-export async function download(version: string, base: string, dir: string, p: Platform = currentPlatform()): Promise<string> {
+export async function download(version: string, base: string, dir: string, pin: Pin, p: Platform = currentPlatform()): Promise<string> {
   const binName = p.os === "windows" ? "sendscore.exe" : "sendscore";
   const target = join(dir, binName);
   const name = archiveName(version, p);
-  const checksums = (await fetchBytes(`${base}/checksums.txt`)).toString();
   const archive = await fetchBytes(`${base}/${name}`);
-  const actual = createHash("sha256").update(archive).digest("hex");
-  if (actual !== expectedHash(checksums, name)) {
-    throw new SendScoreError(`${name} does not match checksums.txt`, 0);
+  if (sha256(archive) !== pin.archive) {
+    throw new SendScoreError(`${name} does not match its pinned hash`, 0);
   }
   const binary = p.os === "windows" ? fromZip(archive, binName) : fromTar(gunzipSync(archive), binName);
   if (!binary) throw new SendScoreError(`${name} has no ${binName}`, 0);
-  await mkdir(dirname(target), { recursive: true });
-  const temp = await mkdtemp(join(dir, ".download-"));
+  if (sha256(binary) !== pin.binary) {
+    throw new SendScoreError(`the binary in ${name} does not match its pinned hash`, 0);
+  }
   try {
-    const path = join(temp, binName);
-    await writeFile(path, binary, { mode: 0o755 });
-    await chmod(path, 0o755);
-    await rename(path, target);
-  } finally {
-    await rm(temp, { recursive: true, force: true });
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const temp = await mkdtemp(join(dir, ".download-"));
+    try {
+      const path = join(temp, binName);
+      await writeFile(path, binary, { mode: 0o755 });
+      await chmod(path, 0o755);
+      await rename(path, target);
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  } catch (e) {
+    throw new SendScoreError(`could not write to ${dir}: ${(e as Error).message}`, 0);
   }
   return target;
 }
-

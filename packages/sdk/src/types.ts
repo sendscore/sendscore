@@ -96,4 +96,12 @@ export interface CheckOptions {
   tls?: boolean;
   /** Path of the publication's previous issue, to list what changed. */
   previous?: string;
+  /** Kill the CLI and throw after this many milliseconds. No limit by default. */
+  timeout?: number;
+}
+
+/** What a comparison should do beyond reading the messages. */
+export interface DiffOptions {
+  /** Kill the CLI and throw after this many milliseconds. No limit by default. */
+  timeout?: number;
 }
