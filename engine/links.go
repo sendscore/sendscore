@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,8 +47,26 @@ var actionPathWords = []string{
 	"abonn", "leiratkoz", "peruuta",
 }
 
+// unescapeLenient decodes the percent escapes in s that are valid and leaves
+// the rest, so one bad escape cannot hide a word from the checks below.
+func unescapeLenient(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			if v, err := strconv.ParseUint(s[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
 func isActionLink(u string, listUnsub []string) bool {
-	l := strings.ToLower(u)
+	// Twice, for a URL escaped twice over.
+	l := strings.ToLower(u + " " + unescapeLenient(u) + " " + unescapeLenient(unescapeLenient(u)))
 	for _, lu := range listUnsub {
 		if strings.EqualFold(u, lu) || sameEndpoint(u, lu) {
 			return true
@@ -62,10 +81,8 @@ func isActionLink(u string, listUnsub []string) bool {
 	if err != nil {
 		return false
 	}
-	rest := strings.ToLower(p.EscapedPath() + "?" + p.RawQuery)
-	if un, err := url.PathUnescape(rest); err == nil {
-		rest += " " + strings.ToLower(un)
-	}
+	rest := p.EscapedPath() + "?" + p.RawQuery
+	rest = strings.ToLower(rest + " " + unescapeLenient(rest) + " " + unescapeLenient(unescapeLenient(rest)))
 	for _, w := range actionPathWords {
 		if strings.Contains(rest, w) {
 			return true
@@ -181,7 +198,11 @@ var nonPublic = func() []netip.Prefix {
 	return out
 }()
 
-var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+var (
+	nat64 = netip.MustParsePrefix("64:ff9b::/96")
+	// globalUnicast is all of IPv6 that is allocated for the public internet.
+	globalUnicast = netip.MustParsePrefix("2000::/3")
+)
 
 func publicIP(ip net.IP) bool {
 	a, ok := netip.AddrFromSlice(ip)
@@ -193,6 +214,9 @@ func publicIP(ip net.IP) bool {
 	if nat64.Contains(a) {
 		b := a.As16()
 		a = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	}
+	if a.Is6() && !globalUnicast.Contains(a) {
+		return false
 	}
 	for _, p := range nonPublic {
 		if p.Contains(a) {
@@ -206,6 +230,9 @@ type linkResult struct {
 	URL    string `json:"url"`
 	Status int    `json:"status,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// Unknown is set when the answer says nothing about the link itself,
+	// such as a timeout, a failed DNS lookup, or a refused robot.
+	Unknown bool `json:"-"`
 }
 
 func (r *run) checkLinks() {
@@ -215,6 +242,12 @@ func (r *run) checkLinks() {
 		return
 	}
 	base := r.opts.HTTPClient
+	if _, offline := r.opts.Resolver.(OfflineResolver); offline && base == nil {
+		// The default client resolves names itself.
+		r.add(skipped("content.links", verdict.Content, "Links not checked", "Offline: fetching links needs DNS."))
+		r.add(skipped("content.images", verdict.Content, "Images not checked", "Offline: fetching images needs DNS."))
+		return
+	}
 	if base == nil {
 		// One transport serves the whole analysis, and its idle
 		// connections are closed when the checks are done.
@@ -229,7 +262,7 @@ func (r *run) checkLinks() {
 	// the text of the others.
 	action := map[string]bool{}
 	for _, l := range r.parsed.Links {
-		if isActionText(l.Text) || isActionLink(l.Href, unsub) {
+		if isActionText(l.Text) || isActionText(l.Context) || isActionLink(l.Href, unsub) {
 			action[l.Href] = true
 		}
 	}
@@ -247,10 +280,14 @@ func (r *run) checkLinks() {
 		}
 		links = append(links, u)
 	}
-	var images []string
+	var images, skippedImages []string
 	for _, im := range r.parsed.Images {
 		if !seen[im.Src] && fetchable(im.Src) && !im.Pixel {
 			seen[im.Src] = true
+			if isActionLink(im.Src, unsub) {
+				skippedImages = append(skippedImages, im.Src)
+				continue
+			}
 			images = append(images, im.Src)
 		}
 	}
@@ -258,7 +295,7 @@ func (r *run) checkLinks() {
 	ctx, cancel := context.WithTimeout(r.ctx, linkCheckDeadline)
 	defer cancel()
 	r.add(r.fetchCheck(ctx, client, stops, "content.links", "link", links, skippedActions))
-	r.add(r.fetchCheck(ctx, client, stops, "content.images", "image", images, nil))
+	r.add(r.fetchCheck(ctx, client, stops, "content.images", "image", images, skippedImages))
 }
 
 // redirectStops records the redirects that were not followed because they
@@ -310,7 +347,7 @@ func fetchable(u string) bool {
 // fetchCheck fetches the URLs and reports the broken ones. A URL still
 // unfinished when ctx ends is not checked, which is not the same as broken.
 func (r *run) fetchCheck(ctx context.Context, client *http.Client, stops *redirectStops, id, noun string, urls, actions []string) verdict.Check {
-	truncated := false
+	truncated, total := false, len(urls)
 	if len(urls) > maxLinkChecks {
 		urls, truncated = urls[:maxLinkChecks], true
 	}
@@ -329,7 +366,7 @@ func (r *run) fetchCheck(ctx context.Context, client *http.Client, stops *redire
 				return
 			}
 			results[i] = fetch(ctx, client, u)
-			unfinished[i] = results[i].Error != "" && ctx.Err() != nil
+			unfinished[i] = results[i].Unknown || (results[i].Error != "" && ctx.Err() != nil)
 		}()
 	}
 	wg.Wait()
@@ -363,7 +400,7 @@ func (r *run) fetchCheck(ctx context.Context, client *http.Client, stops *redire
 		capped(ev, "redirect_not_followed", stopped)
 	}
 	if truncated {
-		ev["truncated_at"] = maxLinkChecks
+		ev["truncated_at"], ev["total"] = maxLinkChecks, total
 	}
 	c := verdict.Check{ID: id, Category: verdict.Content, Evidence: r.noteLimit(ev)}
 	switch {
@@ -373,21 +410,48 @@ func (r *run) fetchCheck(ctx context.Context, client *http.Client, stops *redire
 		c.Status, c.Title = verdict.Fail, fmt.Sprintf("%d of %d %ss are broken", len(broken), checked, noun)
 		if len(notChecked) > 0 {
 			c.Title = fmt.Sprintf("%d of %d checked %ss are broken", len(broken), checked, noun)
-			c.Detail = fmt.Sprintf("%s could not be checked before the time for link checks ran out.", plural(len(notChecked), noun))
+			c.Detail = fmt.Sprintf("%s could not be checked, because of a timeout, a DNS failure, a server that refuses robots, or the time for link checks running out.", plural(len(notChecked), noun))
 		}
 		c.Fix = &verdict.Fix{Who: verdict.FixedByYou, Text: "Fix or remove the broken " + noun + "s before sending."}
 	case len(notChecked) > 0:
-		reason := fmt.Sprintf("The time for link checks ran out with %d of %d %ss not checked.", len(notChecked), len(urls), noun)
+		reason := fmt.Sprintf("%d of %d %ss gave no clear answer, because of a timeout, a DNS failure, or a server that refuses robots.", len(notChecked), len(urls), noun)
+		if ctx.Err() != nil {
+			reason = fmt.Sprintf("The time for link checks ran out with %d of %d %ss not checked.", len(notChecked), len(urls), noun)
+		}
 		if checked > 0 {
 			reason += fmt.Sprintf(" The %d that were checked load.", checked)
 		}
 		c = skipped(id, verdict.Content, fmt.Sprintf("Not every %s could be checked", noun), reason)
 		c.Evidence = r.noteLimit(ev)
+	case truncated:
+		c.Status, c.Title = verdict.Info, fmt.Sprintf("The first %d of %d %ss load", len(urls), total, noun)
 	default:
 		c = r.partial(verdict.Check{ID: id, Category: verdict.Content, Status: verdict.Pass,
 			Title: fmt.Sprintf("All %d %ss load", len(urls), noun), Evidence: c.Evidence})
 	}
 	return c
+}
+
+// inconclusive reports whether a failed fetch says nothing about the link.
+func inconclusive(err error) bool {
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return !dns.IsNotFound
+	}
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) ||
+		(errors.As(err, &ne) && ne.Timeout())
+}
+
+// inconclusiveStatus reports whether a status says nothing about whether the
+// link works: the server is busy, or it does not answer robots.
+func inconclusiveStatus(code int) bool {
+	switch code {
+	case 401, 403, 429, 502, 503, 504:
+		return true
+	}
+	return false
 }
 
 func fetch(ctx context.Context, client *http.Client, u string) linkResult {
@@ -401,14 +465,14 @@ func fetch(ctx context.Context, client *http.Client, u string) linkResult {
 		req.Header.Set("User-Agent", "SendScore link check (+https://github.com/sendscore/sendscore)")
 		resp, err := client.Do(req)
 		if err != nil {
-			res.Error = err.Error()
+			res.Error, res.Unknown = err.Error(), inconclusive(err)
 			continue
 		}
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
-		res.Status, res.Error = resp.StatusCode, ""
+		res.Status, res.Error, res.Unknown = resp.StatusCode, "", inconclusiveStatus(resp.StatusCode)
 		// Many servers refuse HEAD; only a GET answer is final.
-		if method == http.MethodHead && (resp.StatusCode == 405 || resp.StatusCode == 403 || resp.StatusCode == 501 || resp.StatusCode == 404) {
+		if method == http.MethodHead && (resp.StatusCode == 405 || resp.StatusCode == 403 || resp.StatusCode == 501 || resp.StatusCode == 404 || resp.StatusCode == 429 || resp.StatusCode == 503) {
 			continue
 		}
 		return res
