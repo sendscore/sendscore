@@ -218,7 +218,12 @@ func (w *walker) walk(h textproto.MIMEHeader, body io.Reader, depth int) {
 		m.Text, used = decoded, true
 	}
 	if used && (cut || err != nil) {
-		w.cut = true
+		if mediaType == "text/html" {
+			w.cut = true
+		} else {
+			// The plain text part matters only when there is no HTML.
+			w.lost = true
+		}
 	}
 }
 
