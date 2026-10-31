@@ -1,0 +1,26 @@
+{
+  "name": "sendscore",
+  "version": "0.2.0",
+  "description": "Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "git+https://github.com/sendscore/sendscore.git", "directory": "packages/sdk" },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test test/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.6.0"
+  }
+}
