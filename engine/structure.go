@@ -91,7 +91,8 @@ func (r *run) structure() {
 	if _, err := m.Header.Date(); err != nil {
 		missing = append(missing, "Date")
 	}
-	froms, err := mail.ParseAddressList(m.Header.Get("From"))
+	parser := mail.AddressParser{WordDecoder: wordDecoder}
+	froms, err := parser.ParseList(m.Header.Get("From"))
 	if err != nil || len(froms) != 1 || len(m.all("From")) != 1 {
 		missing = append(missing, "a single valid From")
 	}
