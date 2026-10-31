@@ -1,6 +1,7 @@
 package ai.sendscore;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -13,6 +14,7 @@ public final class CheckOptions {
   private String helo;
   private Boolean tls;
   private Path previous;
+  private Duration timeout;
 
   /** Make no DNS lookups. Checks that need DNS are skipped. */
   public CheckOptions offline(boolean value) {
@@ -56,6 +58,16 @@ public final class CheckOptions {
     return this;
   }
 
+  /** Kill the CLI and throw after this long. No limit by default. */
+  public CheckOptions timeout(Duration value) {
+    timeout = value;
+    return this;
+  }
+
+  Duration timeout() {
+    return timeout;
+  }
+
   List<String> args() {
     List<String> out = new ArrayList<>();
     if (offline) {
@@ -77,7 +89,7 @@ public final class CheckOptions {
       out.addAll(List.of("--tls", tls ? "yes" : "no"));
     }
     if (previous != null) {
-      out.addAll(List.of("--previous", previous.toString()));
+      out.addAll(List.of("--previous", SendScore.pathArg(previous)));
     }
     return out;
   }

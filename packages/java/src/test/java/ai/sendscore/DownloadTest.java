@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -12,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterAll;
@@ -23,6 +26,12 @@ class DownloadTest {
   private static final Path FIXTURES = Path.of("../../conformance/release").toAbsolutePath().normalize();
   private static HttpServer server;
   private static String base;
+  private static final String[] LINUX = {"linux", "amd64"};
+
+  private static String[] pin(String[] target) throws IOException {
+    JsonNode entry = new ObjectMapper().readTree(FIXTURES.resolve("pins.json").toFile()).get(target[0] + "_" + target[1]);
+    return new String[] {entry.get("archive").asText(), entry.get("binary").asText()};
+  }
 
   @BeforeAll
   static void start() throws IOException {
@@ -52,7 +61,7 @@ class DownloadTest {
     String[][] targets = {{"linux", "amd64"}, {"darwin", "arm64"}, {"windows", "amd64"}};
     for (int i = 0; i < targets.length; i++) {
       Path cache = tmp.resolve("cache" + i);
-      Path path = Binary.download("0.0.0-test", base + "/good", cache, targets[i]);
+      Path path = Binary.download("0.0.0-test", base + "/good", cache, pin(targets[i]), targets[i]);
       assertTrue(new String(Files.readAllBytes(path), StandardCharsets.UTF_8).contains("fake sendscore"));
       assertTrue(Files.isExecutable(path));
       try (Stream<Path> files = Files.list(cache)) {
@@ -63,14 +72,38 @@ class DownloadTest {
   }
 
   @Test
-  void refusesAMismatch(@TempDir Path tmp) {
+  void refusesAMismatch(@TempDir Path tmp) throws IOException {
     Path cache = tmp.resolve("cache");
-    assertThrows(SendScoreException.class, () -> Binary.download("0.0.0-test", base + "/tampered", cache, new String[] {"linux", "amd64"}));
+    String[] pin = pin(LINUX);
+    assertThrows(SendScoreException.class, () -> Binary.download("0.0.0-test", base + "/altered", cache, pin, LINUX));
     assertFalse(Files.exists(cache));
   }
 
   @Test
-  void failsOnAMissingRelease(@TempDir Path tmp) {
-    assertThrows(SendScoreException.class, () -> Binary.download("0.0.0-test", base + "/nothing", tmp.resolve("cache"), new String[] {"linux", "amd64"}));
+  void failsOnAMissingRelease(@TempDir Path tmp) throws IOException {
+    String[] pin = pin(LINUX);
+    assertThrows(SendScoreException.class, () -> Binary.download("0.0.0-test", base + "/nothing", tmp.resolve("cache"), pin, LINUX));
+  }
+
+  @Test
+  void refusesABinaryThatDoesNotMatch(@TempDir Path tmp) throws IOException {
+    Path cache = tmp.resolve("cache");
+    String[] wrong = {pin(LINUX)[0], "0".repeat(64)};
+    assertThrows(SendScoreException.class, () -> Binary.download("0.0.0-test", base + "/good", cache, wrong, LINUX));
+    assertFalse(Files.exists(cache));
+  }
+
+  @Test
+  void aCachedBinaryIsTrustedOnlyWhileItMatches(@TempDir Path tmp) throws IOException {
+    String[] pin = pin(LINUX);
+    Path path = Binary.download("0.0.0-test", base + "/good", tmp.resolve("cache"), pin, LINUX);
+    assertTrue(Binary.matchesPin(path, pin));
+    Files.writeString(path, "planted");
+    assertFalse(Binary.matchesPin(path, pin));
+  }
+
+  @Test
+  void noPinMeansNoDownload() {
+    assertThrows(SendScoreException.class, () -> Binary.pinFor(LINUX, Map.of()));
   }
 }

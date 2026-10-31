@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,6 +19,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.Locale;
+import java.util.Map;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -29,29 +31,106 @@ public final class Binary {
 
   private static final String RELEASES = "https://github.com/sendscore/sendscore/releases/download";
 
+  private static final int MAX_DOWNLOAD = 100 << 20;
+
+  /** The environment to read, which tests replace because Java cannot set its own. */
+  static Map<String, String> env = System.getenv();
+
   private Binary() {}
 
-  /** Finds the CLI: SENDSCORE_BIN, then PATH, then the cache, then a download. */
+  /**
+   * Finds the CLI: SENDSCORE_BIN, then the pinned version on PATH, then the cache, then a download.
+   * A cached binary is checked against its pinned hash every time, so a file planted in the cache
+   * is replaced and never run.
+   */
   public static String find() {
-    String fromEnv = System.getenv("SENDSCORE_BIN");
+    String fromEnv = env.get("SENDSCORE_BIN");
     if (fromEnv != null && !fromEnv.isEmpty()) {
       return fromEnv;
     }
-    String os = platform()[0];
-    String exe = exe(os);
-    String path = System.getenv("PATH");
+    String exe = exe(windows() ? "windows" : "unix");
+    String path = env.get("PATH");
     if (path != null) {
       for (String dir : path.split(File.pathSeparator)) {
-        if (!dir.isEmpty() && Files.isExecutable(Path.of(dir, exe)) && Files.isRegularFile(Path.of(dir, exe))) {
-          return Path.of(dir, exe).toString();
+        if (dir.isEmpty() || !Path.of(dir).isAbsolute()) {
+          continue;
+        }
+        Path candidate = Path.of(dir, exe);
+        if (Files.isRegularFile(candidate) && Files.isExecutable(candidate) && rightVersion(candidate.toString())) {
+          return candidate.toString();
         }
       }
     }
-    Path dir = cacheRoot(os).resolve("sendscore").resolve(ENGINE_VERSION);
-    if (Files.isExecutable(dir.resolve(exe))) {
+    String[] target = platform();
+    String[] pin = pinFor(target, Hashes.PINS);
+    Path dir = cacheRoot(target[0]).resolve("sendscore").resolve(ENGINE_VERSION);
+    if (matchesPin(dir.resolve(exe), pin)) {
       return dir.resolve(exe).toString();
     }
-    return download(ENGINE_VERSION, RELEASES + "/v" + ENGINE_VERSION, dir, platform()).toString();
+    return download(ENGINE_VERSION, RELEASES + "/v" + ENGINE_VERSION, dir, pin, target).toString();
+  }
+
+  private static boolean windows() {
+    return System.getProperty("os.name").toLowerCase(Locale.ROOT).startsWith("windows");
+  }
+
+  private static boolean rightVersion(String path) {
+    try {
+      Process process = new ProcessBuilder(path, "--version").redirectErrorStream(true).start();
+      process.getOutputStream().close();
+      byte[][] out = new byte[1][];
+      Thread reader = new Thread(() -> {
+        try (InputStream in = process.getInputStream()) {
+          out[0] = in.readNBytes(4096);
+        } catch (IOException e) {
+          out[0] = new byte[0];
+        }
+      });
+      reader.setDaemon(true);
+      reader.start();
+      if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+        process.destroyForcibly();
+        return false;
+      }
+      reader.join(1000);
+      String[] words = new String(out[0] == null ? new byte[0] : out[0], StandardCharsets.UTF_8).trim().split("\\s+");
+      return process.exitValue() == 0 && words[words.length - 1].replaceFirst("^v", "").equals(ENGINE_VERSION);
+    } catch (IOException e) {
+      return false;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    }
+  }
+
+  /** The archive and binary hashes of a platform. With none, nothing is trusted. */
+  static String[] pinFor(String[] target, Map<String, String[]> pins) {
+    String key = target[0] + "_" + target[1];
+    String[] pin = pins.get(key);
+    if (pin == null) {
+      throw new SendScoreException(
+          "this package has no pinned hash for " + key
+              + ", so it will not download a CLI. Install the matching sendscore on PATH, or set SENDSCORE_BIN.",
+          0);
+    }
+    return pin;
+  }
+
+  /** Whether a file exists and is exactly the pinned binary. */
+  static boolean matchesPin(Path path, String[] pin) {
+    try {
+      return Files.isRegularFile(path) && sha256(Files.readAllBytes(path)).equals(pin[1]);
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  private static String sha256(byte[] bytes) {
+    try {
+      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+    } catch (NoSuchAlgorithmException e) {
+      throw new SendScoreException("SHA-256 is not available", 0);
+    }
   }
 
   private static String exe(String os) {
@@ -82,38 +161,34 @@ public final class Binary {
       case "darwin":
         return home.resolve("Library").resolve("Caches");
       case "windows":
-        value = System.getenv("LOCALAPPDATA");
-        return value != null ? Path.of(value) : home.resolve("AppData").resolve("Local");
+        value = env.get("LOCALAPPDATA");
+        return value != null && !value.isEmpty() ? Path.of(value) : home.resolve("AppData").resolve("Local");
       default:
-        value = System.getenv("XDG_CACHE_HOME");
-        return value != null ? Path.of(value) : home.resolve(".cache");
+        value = env.get("XDG_CACHE_HOME");
+        return value != null && Path.of(value).isAbsolute() ? Path.of(value) : home.resolve(".cache");
     }
   }
 
   private static byte[] fetch(HttpClient client, String url) {
     try {
       HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(120)).build();
-      HttpResponse<byte[]> res = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-      if (res.statusCode() != 200) {
-        throw new SendScoreException("download of " + url + " answered " + res.statusCode(), 0);
+      HttpResponse<InputStream> res = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+      try (InputStream body = res.body()) {
+        if (res.statusCode() != 200) {
+          throw new SendScoreException("download of " + url + " answered " + res.statusCode(), 0);
+        }
+        byte[] bytes = body.readNBytes(MAX_DOWNLOAD + 1);
+        if (bytes.length > MAX_DOWNLOAD) {
+          throw new SendScoreException("download of " + url + " is too large", 0);
+        }
+        return bytes;
       }
-      return res.body();
     } catch (IOException e) {
       throw new SendScoreException("download of " + url + " failed: " + e.getMessage(), 0);
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new SendScoreException("download of " + url + " was interrupted", 0);
     }
-  }
-
-  private static String expectedHash(String checksums, String name) {
-    for (String line : checksums.split("\n")) {
-      String[] parts = line.trim().split("\\s+");
-      if (parts.length == 2 && parts[1].equals(name)) {
-        return parts[0].toLowerCase(Locale.ROOT);
-      }
-    }
-    throw new SendScoreException("checksums.txt does not list " + name, 0);
   }
 
   // One file, by its exact name, so no path in the archive is ever used.
@@ -160,31 +235,26 @@ public final class Binary {
   }
 
   /**
-   * Downloads a release into dir, and returns the binary's path. The archive is checked against
-   * checksums.txt before anything is extracted, so a binary that does not match never reaches
-   * the disk.
+   * Downloads a release into dir, and returns the binary's path. The archive must match its pin
+   * before anything is extracted, and the binary must match its pin before it reaches the disk.
    */
-  static Path download(String version, String base, Path dir, String[] target) {
+  static Path download(String version, String base, Path dir, String[] pin, String[] target) {
     String os = target[0];
     String exe = exe(os);
     String ext = os.equals("windows") ? "zip" : "tar.gz";
     String name = "sendscore_" + version + "_" + os + "_" + target[1] + "." + ext;
     HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
-    String checksums = new String(fetch(client, base + "/checksums.txt"), StandardCharsets.UTF_8);
     byte[] archive = fetch(client, base + "/" + name);
-    String actual;
-    try {
-      actual = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(archive));
-    } catch (NoSuchAlgorithmException e) {
-      throw new SendScoreException("SHA-256 is not available", 0);
-    }
-    if (!actual.equals(expectedHash(checksums, name))) {
-      throw new SendScoreException(name + " does not match checksums.txt", 0);
+    if (!sha256(archive).equals(pin[0])) {
+      throw new SendScoreException(name + " does not match its pinned hash", 0);
     }
     try {
       byte[] binary = extract(archive, os, exe);
       if (binary == null) {
         throw new SendScoreException(name + " has no " + exe, 0);
+      }
+      if (!sha256(binary).equals(pin[1])) {
+        throw new SendScoreException("the binary in " + name + " does not match its pinned hash", 0);
       }
       Files.createDirectories(dir);
       Path temp = Files.createTempFile(dir, ".download-", null);
