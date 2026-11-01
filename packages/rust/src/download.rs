@@ -87,11 +87,13 @@ fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Pins by platform, as (platform, archive hash, binary hash).
+pub type Pins = &'static [(&'static str, &'static str, &'static str)];
+
 /// The pin for a platform. With none, nothing is downloaded or trusted.
-pub(crate) fn pin_for(os: &str, arch: &str) -> Result<Pin<'static>, Error> {
+pub(crate) fn pin_for(os: &str, arch: &str, pins: Pins) -> Result<Pin<'static>, Error> {
     let key = format!("{os}_{arch}");
-    HASHES
-        .iter()
+    pins.iter()
         .find(|(k, _, _)| *k == key)
         .map(|(_, archive, binary)| Pin { archive, binary })
         .ok_or_else(|| {
@@ -144,16 +146,27 @@ pub fn find_binary() -> Result<PathBuf, Error> {
     if let Some(path) = env::var_os("SENDSCORE_BIN").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    if let Some(path) = env::var_os("PATH") {
-        for dir in env::split_paths(&path).filter(|d| d.is_absolute()) {
-            let candidate = dir.join(exe_name());
-            if executable(&candidate) && right_version(&candidate) {
-                return Ok(candidate);
-            }
-        }
+    match on_path() {
+        Some(path) => Ok(path),
+        None => installed(HASHES),
     }
+}
+
+/// The pinned version on `PATH`, if there is one.
+#[doc(hidden)]
+pub fn on_path() -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(exe_name()))
+        .find(|candidate| executable(candidate) && right_version(candidate))
+}
+
+/// The cached binary, or a download, as the pins allow.
+#[doc(hidden)]
+pub fn installed(pins: Pins) -> Result<PathBuf, Error> {
     let (os, arch) = platform()?;
-    let pin = pin_for(os, arch)?;
+    let pin = pin_for(os, arch, pins)?;
     let dir = cache_root()
         .ok_or_else(|| fail("no user cache directory".into()))?
         .join("sendscore")

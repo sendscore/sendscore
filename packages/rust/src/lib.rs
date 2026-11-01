@@ -14,7 +14,7 @@ mod download;
 mod hashes;
 mod types;
 
-pub use download::{download as download_release, find_binary, matches_pin, Pin, ENGINE_VERSION};
+pub use download::{download as download_release, find_binary, installed, matches_pin, on_path, Pin, ENGINE_VERSION};
 pub use types::*;
 
 use serde::de::DeserializeOwned;

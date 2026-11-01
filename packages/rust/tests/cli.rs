@@ -1,6 +1,6 @@
 //! Each test sets process-wide environment, so they run one at a time.
 
-use sendscore::{check, diff_with, find_binary, CheckOptions, DiffOptions, ENGINE_VERSION, KILLED};
+use sendscore::{check, diff_with, find_binary, installed, on_path, CheckOptions, DiffOptions, ENGINE_VERSION, KILLED};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,7 +116,13 @@ fn a_wrong_version_on_path_is_not_run() {
     let _g = guard();
     let path = fake("version-9.9.9");
     only_path(path.parent().unwrap().as_os_str());
-    assert!(find_binary().unwrap_err().message.contains("no pinned hash"));
+    assert_eq!(on_path(), None);
+}
+
+#[test]
+fn with_no_pins_nothing_is_installed() {
+    let _g = guard();
+    assert!(installed(&[]).unwrap_err().message.contains("no pinned hash"));
 }
 
 #[test]
@@ -136,9 +142,9 @@ fn relative_path_entries_are_skipped() {
     fs::copy(&path, Path::new(&name).join(EXE)).unwrap();
     let joined = env::join_paths([PathBuf::new(), PathBuf::from(&name)]).unwrap();
     only_path(&joined);
-    let found = find_binary();
+    let found = on_path();
     fs::remove_dir_all(&name).unwrap();
-    assert!(found.unwrap_err().message.contains("no pinned hash"));
+    assert_eq!(found, None);
 }
 
 #[test]
