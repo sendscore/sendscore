@@ -20,11 +20,12 @@ defmodule SendScore.Binary do
   def find do
     case System.get_env("SENDSCORE_BIN") do
       value when value not in [nil, ""] -> value
-      _ -> on_path() || cached_or_download()
+      _ -> on_path() || installed()
     end
   end
 
-  defp on_path do
+  @doc false
+  def on_path do
     separator = if windows?(), do: ";", else: ":"
     name = if windows?(), do: "sendscore.exe", else: "sendscore"
 
@@ -90,9 +91,10 @@ defmodule SendScore.Binary do
     Port.close(port)
   end
 
-  defp cached_or_download do
+  @doc false
+  def installed(pins \\ Hashes.pins()) do
     {os, _arch} = target = platform()
-    pin = pin_for(target)
+    pin = pin_for(target, pins)
     dir = Path.join(cache_root(), @engine_version)
     path = Path.join(dir, exe(os))
 

@@ -70,7 +70,11 @@ defmodule SendScore.CliTest do
 
   test "a wrong version on PATH is not run", ctx do
     only_path(ctx, Path.dirname(fake(ctx, "version-9.9.9")))
-    assert_raise SendScore.Error, ~r/no pinned hash/, fn -> Binary.find() end
+    assert Binary.on_path() == nil
+  end
+
+  test "with no pins, nothing is installed" do
+    assert_raise SendScore.Error, ~r/no pinned hash/, fn -> Binary.installed(%{}) end
   end
 
   test "the pinned version on PATH is used", ctx do
@@ -87,7 +91,7 @@ defmodule SendScore.CliTest do
     on_exit(fn -> File.rm_rf!(name) end)
     separator = if match?({:win32, _}, :os.type()), do: ";", else: ":"
     only_path(ctx, separator <> name)
-    assert_raise SendScore.Error, ~r/no pinned hash/, fn -> Binary.find() end
+    assert Binary.on_path() == nil
   end
 
   test "paths that look like flags are files" do
