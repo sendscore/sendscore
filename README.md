@@ -29,7 +29,7 @@ Each package runs this CLI, so they all return the same verdict and pass the sam
 | PHP | `composer require sendscore/sendscore` | [packages/php](packages/php) |
 | Rust | `cargo add sendscore` | [packages/rust](packages/rust) |
 | Ruby | `gem install sendscore` | [packages/ruby](packages/ruby) |
-| Elixir | `{:sendscore, "~> 0.2"}` | [packages/elixir](packages/elixir) |
+| Elixir | `{:sendscore, "~> 0.3"}` | [packages/elixir](packages/elixir) |
 | Java | `ai.sendscore:sendscore` | [packages/java](packages/java) |
 | .NET | `dotnet add package SendScore` | [packages/dotnet](packages/dotnet) |
 

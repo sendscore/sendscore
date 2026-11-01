@@ -6,7 +6,7 @@ Not published yet.
 
 ```elixir
 def deps do
-  [{:sendscore, "~> 0.2"}]
+  [{:sendscore, "~> 0.3"}]
 end
 ```
 
