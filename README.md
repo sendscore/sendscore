@@ -33,6 +33,8 @@ Each package runs this CLI, so they all return the same verdict and pass the sam
 | Java | `ai.sendscore:sendscore` | [packages/java](packages/java) |
 | .NET | `dotnet add package SendScore` | [packages/dotnet](packages/dotnet) |
 
+The npm and PyPI packages also give you the `sendscore` command, so `npx sendscore check issue.eml` and `pipx install sendscore` work without Go.
+
 Go code can import the engine directly, as [below](#use-it-from-go) shows. The npm package and the Python wheel carry the binary for your machine, so an install downloads nothing later. Every package uses `SENDSCORE_BIN`, then a bundled binary if it has one, then the pinned version on `PATH`, then your user cache, and otherwise downloads the pinned release. A package carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. None has an install script.
 
 ## Use
