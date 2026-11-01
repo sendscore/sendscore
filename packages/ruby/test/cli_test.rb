@@ -65,7 +65,11 @@ class CliTest < Minitest::Test
   def test_a_wrong_version_on_path_is_not_run
     fake("version-9.9.9")
     only_path(File.join(TMP, "version-9.9.9"))
-    assert_match(/no pinned hash/, assert_raises(SendScore::Error) { SendScore::Binary.find }.message)
+    assert_nil SendScore::Binary.on_path
+  end
+
+  def test_with_no_pins_nothing_is_installed
+    assert_match(/no pinned hash/, assert_raises(SendScore::Error) { SendScore::Binary.installed({}) }.message)
   end
 
   def test_the_pinned_version_on_path_is_used
@@ -79,7 +83,7 @@ class CliTest < Minitest::Test
     FileUtils.mkdir_p(name)
     FileUtils.cp(fake(name), File.join(name, EXE))
     only_path([name, ""].join(File::PATH_SEPARATOR))
-    assert_match(/no pinned hash/, assert_raises(SendScore::Error) { SendScore::Binary.find }.message)
+    assert_nil SendScore::Binary.on_path
   ensure
     FileUtils.rm_rf(name)
   end

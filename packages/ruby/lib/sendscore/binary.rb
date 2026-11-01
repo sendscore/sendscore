@@ -27,20 +27,33 @@ module SendScore
       from_env = ENV["SENDSCORE_BIN"]
       return from_env if from_env && !from_env.empty?
 
-      name = windows? ? "sendscore.exe" : "sendscore"
+      on_path || installed
+    rescue SystemCallError => e
+      raise Error.new("could not find or install the CLI: #{e.message}", 0)
+    end
+
+    # The pinned version on PATH, or nil.
+    def on_path
       ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |dir|
-        path = File.join(dir, name)
+        path = File.join(dir, exe_name)
         return path if absolute?(dir) && File.file?(path) && File.executable?(path) && right_version?(path)
       end
+      nil
+    end
+
+    # The cached binary, or a download, as the pins allow.
+    def installed(pins = HASHES)
       target = platform
-      pin = pin_for(target)
+      pin = pin_for(target, pins)
       dir = File.join(cache_root, "sendscore", ENGINE_VERSION)
-      cached = File.join(dir, name)
+      cached = File.join(dir, exe_name)
       return cached if matches_pin?(cached, pin)
 
       download(ENGINE_VERSION, "#{RELEASES}/v#{ENGINE_VERSION}", dir, pin, target)
-    rescue SystemCallError => e
-      raise Error.new("could not find or install the CLI: #{e.message}", 0)
+    end
+
+    def exe_name
+      windows? ? "sendscore.exe" : "sendscore"
     end
 
     def absolute?(path)
