@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ENGINE_VERSION, KILLED, SendScoreError, binary, check, diff } from "../dist/index.js";
+import { ENGINE_VERSION, KILLED, SendScoreError, binary, check, diff, installed, onPath } from "../dist/index.js";
 
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
 const windows = process.platform === "win32";
@@ -75,7 +75,11 @@ test("unknown fields, statuses, and stderr noise are tolerated", async () => {
 test("a CLI of the wrong version on PATH is not run", async () => {
   onlyPath(join(tmp, "version-9.9.9"));
   fake("version-9.9.9");
-  await assert.rejects(binary(), /no pinned hash/);
+  assert.equal(await onPath(), null);
+});
+
+test("with no pins, nothing is installed", async () => {
+  await assert.rejects(installed({}), (e) => e instanceof SendScoreError && /no pinned hash/.test(e.message));
 });
 
 test("the pinned version on PATH is used", async () => {
@@ -90,7 +94,7 @@ test("a relative PATH entry is skipped", async () => {
   copyFileSync(fake(dir), join(dir, exe));
   try {
     onlyPath(["", dir].join(delimiter));
-    await assert.rejects(binary(), /no pinned hash/);
+    assert.equal(await onPath(), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

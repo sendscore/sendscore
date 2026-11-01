@@ -44,20 +44,30 @@ export async function binary(): Promise<string> {
   const fromEnv = process.env["SENDSCORE_BIN"];
   if (fromEnv) return fromEnv;
   try {
-    for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
-      if (!isAbsolute(dir)) continue;
-      const path = join(dir, exe);
-      if ((await executable(path)) && (await rightVersion(path))) return path;
-    }
-    const platform = currentPlatform();
-    const pin = pinFor(platform);
-    const dir = join(cacheRoot(), "sendscore", ENGINE_VERSION);
-    if (await matchesPin(join(dir, exe), pin)) return join(dir, exe);
-    return await download(ENGINE_VERSION, `${RELEASES}/v${ENGINE_VERSION}`, dir, pin, platform);
+    return (await onPath()) ?? (await installed());
   } catch (e) {
     if (e instanceof SendScoreError) throw e;
     throw new SendScoreError(`could not find or install the CLI: ${(e as Error).message}`, 0);
   }
+}
+
+/** The pinned version on PATH, or null. Exported for tests. */
+export async function onPath(): Promise<string | null> {
+  for (const dir of (process.env["PATH"] ?? "").split(delimiter)) {
+    if (!isAbsolute(dir)) continue;
+    const path = join(dir, exe);
+    if ((await executable(path)) && (await rightVersion(path))) return path;
+  }
+  return null;
+}
+
+/** The cached binary, or a download, as the pins allow. Exported for tests. */
+export async function installed(pins?: Parameters<typeof pinFor>[1]): Promise<string> {
+  const platform = currentPlatform();
+  const pin = pinFor(platform, pins);
+  const dir = join(cacheRoot(), "sendscore", ENGINE_VERSION);
+  if (await matchesPin(join(dir, exe), pin)) return join(dir, exe);
+  return await download(ENGINE_VERSION, `${RELEASES}/v${ENGINE_VERSION}`, dir, pin, platform);
 }
 
 interface Result {
