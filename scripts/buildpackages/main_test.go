@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -201,5 +202,52 @@ func TestWheel(t *testing.T) {
 		if parts[1] != "sha256="+base64.RawURLEncoding.EncodeToString(s[:]) {
 			t.Errorf("RECORD is wrong for %s", parts[0])
 		}
+	}
+}
+
+// PyPI refuses a wheel with a data descriptor, which is bit 3 of the general
+// purpose flags in each local file header.
+func TestWheelHasNoDataDescriptors(t *testing.T) {
+	out := t.TempDir()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Repeat([]byte("binary "), 4096)
+	if err := wheel(root, out, "0.0.0", "linux_amd64", body); err != nil {
+		t.Fatal(err)
+	}
+	names, err := filepath.Glob(filepath.Join(out, "python", "*.whl"))
+	if err != nil || len(names) != 1 {
+		t.Fatalf("wheels = %v, %v", names, err)
+	}
+	raw, err := os.ReadFile(names[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range z.File {
+		if f.Flags&0x8 != 0 {
+			t.Errorf("%s has a data descriptor in the central directory", f.Name)
+		}
+		off, err := f.DataOffset()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The local header sits before the data: signature, version, flags.
+		nameLen := int64(len(f.Name))
+		start := off - 30 - nameLen - int64(len(f.Extra))
+		if start < 0 || !bytes.Equal(raw[start:start+4], []byte("PK\x03\x04")) {
+			continue
+		}
+		if raw[start+6]&0x8 != 0 {
+			t.Errorf("%s has a data descriptor in its local header", f.Name)
+		}
+	}
+	if bytes.Contains(raw, []byte("PK\x07\x08")) {
+		t.Error("the wheel holds a data descriptor signature")
 	}
 }

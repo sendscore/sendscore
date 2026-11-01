@@ -15,12 +15,14 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"compress/flate"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -334,13 +336,32 @@ func wheel(root, out, version, platform string, binary []byte) error {
 	var buf bytes.Buffer
 	z := zip.NewWriter(&buf)
 	for _, f := range files {
-		h := &zip.FileHeader{Name: f.name, Method: zip.Deflate}
-		h.SetMode(f.mode)
-		w, err := z.CreateHeader(h)
+		// PyPI refuses a data descriptor, which CreateHeader always writes, so
+		// the sizes and checksum go in the header, ahead of the data.
+		var packed bytes.Buffer
+		c, err := flate.NewWriter(&packed, flate.BestCompression)
 		if err != nil {
 			return err
 		}
-		if _, err := w.Write(f.body); err != nil {
+		if _, err := c.Write(f.body); err != nil {
+			return err
+		}
+		if err := c.Close(); err != nil {
+			return err
+		}
+		h := &zip.FileHeader{
+			Name:               f.name,
+			Method:             zip.Deflate,
+			CRC32:              crc32.ChecksumIEEE(f.body),
+			CompressedSize64:   uint64(packed.Len()),
+			UncompressedSize64: uint64(len(f.body)),
+		}
+		h.SetMode(f.mode)
+		w, err := z.CreateRaw(h)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(packed.Bytes()); err != nil {
 			return err
 		}
 	}
