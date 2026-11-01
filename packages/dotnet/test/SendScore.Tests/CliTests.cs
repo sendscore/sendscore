@@ -118,7 +118,13 @@ public class CliTests : IDisposable
     public async Task AWrongVersionOnPathIsNotRun()
     {
         OnlyPath(Path.GetDirectoryName(Fake("version-9.9.9"))!);
-        var e = await Assert.ThrowsAsync<SendScoreException>(() => Binary.FindAsync());
+        Assert.Null(await Binary.OnPathAsync());
+    }
+
+    [Fact]
+    public async Task WithNoPinsNothingIsInstalled()
+    {
+        var e = await Assert.ThrowsAsync<SendScoreException>(() => Binary.InstalledAsync(new()));
         Assert.Contains("no pinned hash", e.Message);
     }
 
@@ -139,8 +145,7 @@ public class CliTests : IDisposable
         try
         {
             OnlyPath(Path.PathSeparator + name);
-            var e = await Assert.ThrowsAsync<SendScoreException>(() => Binary.FindAsync());
-            Assert.Contains("no pinned hash", e.Message);
+            Assert.Null(await Binary.OnPathAsync());
         }
         finally
         {

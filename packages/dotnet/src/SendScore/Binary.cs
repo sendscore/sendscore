@@ -28,23 +28,37 @@ public static class Binary
         {
             return fromEnv;
         }
-        var exe = OperatingSystem.IsWindows() ? "sendscore.exe" : "sendscore";
+        return await OnPathAsync(cancel).ConfigureAwait(false)
+            ?? await InstalledAsync(Hashes.Pins, cancel).ConfigureAwait(false);
+    }
+
+    private static string ExeName => OperatingSystem.IsWindows() ? "sendscore.exe" : "sendscore";
+
+    /// <summary>The pinned version on PATH, or null.</summary>
+    internal static async Task<string?> OnPathAsync(CancellationToken cancel = default)
+    {
         foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
             if (!Path.IsPathFullyQualified(dir))
             {
                 continue;
             }
-            var candidate = Path.Combine(dir, exe);
+            var candidate = Path.Combine(dir, ExeName);
             if (Executable(candidate) && await RightVersionAsync(candidate, cancel).ConfigureAwait(false))
             {
                 return candidate;
             }
         }
+        return null;
+    }
+
+    /// <summary>The cached binary, or a download, as the pins allow.</summary>
+    internal static async Task<string> InstalledAsync(Dictionary<string, (string Archive, string Binary)> pins, CancellationToken cancel = default)
+    {
         var target = Platform();
-        var pin = PinFor(target, Hashes.Pins);
+        var pin = PinFor(target, pins);
         var cache = Path.Combine(CacheRoot(target.Os), "sendscore", EngineVersion);
-        var cached = Path.Combine(cache, exe);
+        var cached = Path.Combine(cache, ExeName);
         return MatchesPin(cached, pin)
             ? cached
             : await DownloadAsync(EngineVersion, $"{Releases}/v{EngineVersion}", cache, pin, target, cancel).ConfigureAwait(false);
