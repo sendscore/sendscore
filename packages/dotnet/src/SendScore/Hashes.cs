@@ -5,5 +5,11 @@ internal static class Hashes
 {
     internal static readonly Dictionary<string, (string Archive, string Binary)> Pins = new()
     {
+        ["darwin_amd64"] = ("5486ae45ff37ce84abe3ccd7452ed2627423b9feedabc0f49726e8e250878cd9", "dea8f098b9983cfc00d1e7d68dfe9dd365f1f5d8d1acf33c2ce97a227d89f508"),
+        ["darwin_arm64"] = ("60e6628803454e213383d85c63086b478963b6273e12f79496fb7c1cdad71389", "9c6190ff8bf74061645cfbf261932b2c7a63a338ed5100027cf9b39be1243628"),
+        ["linux_amd64"] = ("0aa0ba0facbcd5114b89ed433aec596727302d4731f77c1afa4e19cb24fbab71", "7ba166f161c4e180bc2f20e34cd11c062831e0478330b90576e06e9e26a52bb9"),
+        ["linux_arm64"] = ("05a68a010b30c28e6ea69d3ff204dec18cd74caa12cd440f1d604a43c39aaed0", "740d3081f9b0322d77adc592af63e94be46100e2aa1a353a0ebeb92b5faff1a0"),
+        ["windows_amd64"] = ("d096e4fbf8532ff9cfbe1276785c6c7914e208b01bdaf6a5e18c767b54c30579", "aeccf7a9e3570f1619511aae01403b70d122f2cc231b54b8287d3e21a95ca0a7"),
+        ["windows_arm64"] = ("db201d61f3b19913fe46a44ab4413a03004d7533434c141b7ebecc32cee7eed8", "ab318c7a1fb14aedb0ff7ffcbd0fea62a9b15b7d002f1d7ccd038a3d36f2e962"),
     };
 }
