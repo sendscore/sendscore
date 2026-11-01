@@ -48,6 +48,12 @@ public final class Binary {
     if (fromEnv != null && !fromEnv.isEmpty()) {
       return fromEnv;
     }
+    String found = onPath();
+    return found != null ? found : installed(Hashes.PINS);
+  }
+
+  /** The pinned version on PATH, or null. */
+  static String onPath() {
     String exe = exe(windows() ? "windows" : "unix");
     String path = env.get("PATH");
     if (path != null) {
@@ -61,8 +67,14 @@ public final class Binary {
         }
       }
     }
+    return null;
+  }
+
+  /** The cached binary, or a download, as the pins allow. */
+  static String installed(Map<String, String[]> pins) {
     String[] target = platform();
-    String[] pin = pinFor(target, Hashes.PINS);
+    String[] pin = pinFor(target, pins);
+    String exe = exe(target[0]);
     Path dir = cacheRoot(target[0]).resolve("sendscore").resolve(ENGINE_VERSION);
     if (matchesPin(dir.resolve(exe), pin)) {
       return dir.resolve(exe).toString();

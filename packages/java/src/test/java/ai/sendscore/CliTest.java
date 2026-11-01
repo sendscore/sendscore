@@ -2,6 +2,7 @@ package ai.sendscore;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -98,7 +99,13 @@ class CliTest {
   @Test
   void aWrongVersionOnPathIsNotRun() throws IOException {
     onlyPath(fake("version-9.9.9").getParent().toString());
-    assertTrue(assertThrows(SendScoreException.class, Binary::find).getMessage().contains("no pinned hash"));
+    assertNull(Binary.onPath());
+  }
+
+  @Test
+  void withNoPinsNothingIsInstalled() {
+    SendScoreException e = assertThrows(SendScoreException.class, () -> Binary.installed(Map.of()));
+    assertTrue(e.getMessage().contains("no pinned hash"));
   }
 
   @Test
@@ -117,7 +124,7 @@ class CliTest {
     copy.toFile().setExecutable(true, false);
     try {
       onlyPath(File.pathSeparator + name);
-      assertTrue(assertThrows(SendScoreException.class, Binary::find).getMessage().contains("no pinned hash"));
+      assertNull(Binary.onPath());
     } finally {
       Files.deleteIfExists(copy);
       Files.deleteIfExists(copy.getParent());
