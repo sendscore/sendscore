@@ -10,7 +10,7 @@ import (
 )
 
 // packageVersion is the version every package and pinned CLI carries.
-const packageVersion = "0.3.0"
+const packageVersion = "0.3.1"
 
 // TestReleaseTag stops a release whose tag is not the version the packages
 // pin, because they would look for a release that does not exist.

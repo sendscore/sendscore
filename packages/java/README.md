@@ -8,7 +8,7 @@ Not published yet.
 <dependency>
   <groupId>ai.sendscore</groupId>
   <artifactId>sendscore</artifactId>
-  <version>0.3.0</version>
+  <version>0.3.1</version>
 </dependency>
 ```
 

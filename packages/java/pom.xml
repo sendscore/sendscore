@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>ai.sendscore</groupId>
   <artifactId>sendscore</artifactId>
-  <version>0.3.0</version>
+  <version>0.3.1</version>
   <packaging>jar</packaging>
   <name>SendScore</name>
   <description>Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI.</description>

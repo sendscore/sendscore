@@ -21,7 +21,7 @@ from pathlib import Path
 from ._error import SendScoreError
 from ._hashes import HASHES
 
-ENGINE_VERSION = "0.3.0"
+ENGINE_VERSION = "0.3.1"
 RELEASES = "https://github.com/sendscore/sendscore/releases/download"
 MAX_DOWNLOAD = 100 << 20
 

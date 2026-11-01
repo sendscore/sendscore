@@ -3,7 +3,7 @@ defmodule SendScore.Binary do
 
   alias SendScore.{Error, Hashes}
 
-  @engine_version "0.3.0"
+  @engine_version "0.3.1"
   @releases "https://github.com/sendscore/sendscore/releases/download"
   @max_download 100 * 1024 * 1024
   @download_timeout 120_000

@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>SendScore</RootNamespace>
     <PackageId>SendScore</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.3.1</Version>
     <Description>Check a newsletter email before it goes out. A typed wrapper around the SendScore CLI.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>

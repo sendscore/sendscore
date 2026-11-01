@@ -27,7 +27,7 @@ import java.util.zip.ZipInputStream;
 /** Finds the CLI, and downloads a release when none is installed. */
 public final class Binary {
   /** The CLI release this package downloads when none is installed. */
-  public static final String ENGINE_VERSION = "0.3.0";
+  public static final String ENGINE_VERSION = "0.3.1";
 
   private static final String RELEASES = "https://github.com/sendscore/sendscore/releases/download";
 
