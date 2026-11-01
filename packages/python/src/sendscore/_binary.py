@@ -1,4 +1,4 @@
-"""Finds the CLI, and downloads a release when none is installed."""
+"""Finds the CLI, which a wheel carries, and downloads a release when none is installed."""
 
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ def _right_version(path: str) -> bool:
 
 
 def find_binary() -> str:
-    """Finds the CLI: SENDSCORE_BIN, then the pinned version on PATH, then the cache, then a download.
+    """Finds the CLI: SENDSCORE_BIN, the wheel's binary, the pinned version on PATH, the cache, a download.
 
     A cached binary is checked against its pinned hash every time, so a file
     planted in the cache is replaced and never run.
@@ -165,7 +165,17 @@ def find_binary() -> str:
     from_env = os.environ.get("SENDSCORE_BIN")
     if from_env:
         return from_env
-    return on_path() or installed()
+    return bundled() or on_path() or installed()
+
+
+def bundled() -> str | None:
+    """The binary inside this wheel, or None.
+
+    It came with this code, so it is trusted as this code is, and needs no
+    version check or hash. A source checkout has none.
+    """
+    path = Path(__file__).parent / "_bin" / _exe_name()
+    return str(path) if _executable(str(path)) else None
 
 
 def on_path() -> str | None:

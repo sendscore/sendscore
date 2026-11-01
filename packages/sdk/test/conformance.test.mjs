@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { SendScoreError, check, diff } from "../dist/index.js";
+
+// SENDSCORE_PACKAGE tests an installed copy instead of this checkout.
+const { SendScoreError, check, diff } = await import(process.env.SENDSCORE_PACKAGE ?? "../dist/index.js");
 
 const root = fileURLToPath(new URL("../../../conformance/", import.meta.url));
 const { cases } = JSON.parse(readFileSync(`${root}cases.json`, "utf8"));

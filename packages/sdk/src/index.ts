@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { access, constants, stat } from "node:fs/promises";
-import { delimiter, isAbsolute, join } from "node:path";
+import { createRequire } from "node:module";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { RELEASES, cacheRoot, currentPlatform, download, matchesPin, pinFor } from "./download.js";
 import { KILLED, SendScoreError } from "./error.js";
 import type { CheckOptions, DiffOptions, DiffResult, Verdict } from "./types.js";
@@ -36,18 +37,34 @@ async function rightVersion(path: string): Promise<boolean> {
 }
 
 /**
- * Finds the CLI: SENDSCORE_BIN, then the pinned version on PATH, then the
- * cache, then a download. A cached binary is checked against its pinned hash
- * every time, so a file planted in the cache is replaced and never run.
+ * Finds the CLI: SENDSCORE_BIN, then the binary installed with this package,
+ * then the pinned version on PATH, then the cache, then a download. A cached
+ * binary is checked against its pinned hash every time, so a file planted in
+ * the cache is replaced and never run.
  */
 export async function binary(): Promise<string> {
   const fromEnv = process.env["SENDSCORE_BIN"];
   if (fromEnv) return fromEnv;
   try {
-    return (await onPath()) ?? (await installed());
+    return (await bundled()) ?? (await onPath()) ?? (await installed());
   } catch (e) {
     if (e instanceof SendScoreError) throw e;
     throw new SendScoreError(`could not find or install the CLI: ${(e as Error).message}`, 0);
+  }
+}
+
+/**
+ * The binary from this platform's package, or null. npm installs only the
+ * package that matches this machine. It came with this code, so it is trusted
+ * as this code is, and needs no version check or hash.
+ */
+export async function bundled(): Promise<string | null> {
+  try {
+    const name = `@sendscore/cli-${process.platform}-${process.arch}`;
+    const path = join(dirname(createRequire(import.meta.url).resolve(`${name}/package.json`)), "bin", exe);
+    return (await executable(path)) ? path : null;
+  } catch {
+    return null;
   }
 }
 

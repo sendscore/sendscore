@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ENGINE_VERSION, KILLED, SendScoreError, binary, check, diff, installed, onPath } from "../dist/index.js";
+import { ENGINE_VERSION, KILLED, SendScoreError, binary, bundled, check, diff, installed, onPath } from "../dist/index.js";
 
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
 const windows = process.platform === "win32";
@@ -119,4 +119,8 @@ test("paths that look like flags or standard input are files", async () => {
     }
   }
   assert.ok(readFileSync(sample).length > 0);
+});
+
+test("a checkout has no bundled binary", async () => {
+  assert.equal(await bundled(), null);
 });

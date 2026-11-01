@@ -9,7 +9,7 @@ from unittest import mock
 
 import sendscore
 from sendscore import ENGINE_VERSION, KILLED, SendScoreError, check, diff
-from sendscore._binary import find_binary, installed, on_path
+from sendscore._binary import bundled, find_binary, installed, on_path
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE = REPO / "conformance" / "messages" / "clean.eml"
@@ -68,6 +68,9 @@ class Cli(unittest.TestCase):
             got = check(SAMPLE)
         self.assertEqual(got["verdict"], "pass")
         self.assertEqual(got["checks"][0]["status"], "brand_new")
+
+    def test_a_checkout_has_no_bundled_binary(self):
+        self.assertIsNone(bundled())
 
     def test_wrong_version_on_path_is_not_run(self):
         self.fake("version-9.9.9")
