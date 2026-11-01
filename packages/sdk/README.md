@@ -8,6 +8,13 @@ Not published yet.
 npm install sendscore
 ```
 
+It also gives you the `sendscore` command, which takes the same arguments and exit codes as the CLI.
+
+```sh
+npx sendscore check issue.eml
+npm install -g sendscore
+```
+
 ```ts
 import { check, diff } from "sendscore";
 
