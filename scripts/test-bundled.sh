@@ -34,6 +34,38 @@ JS
 )
 SENDSCORE_PACKAGE=$(cat "$tmp/npm/url.txt") node --test packages/sdk/test/conformance.test.mjs
 
+# expect CODE COMMAND...: the command must exit with exactly CODE.
+expect() {
+  local want=$1 got=0
+  shift
+  "$@" >/dev/null 2>&1 || got=$?
+  if [ "$got" != "$want" ]; then
+    echo "$* exited $got, want $want" >&2
+    exit 1
+  fi
+}
+
+# The sendscore command must hand over its arguments, streams, and exit code.
+command_checks() {
+  local run=("$@")
+  expect 0 "${run[@]}" --version
+  expect 0 "${run[@]}" diff "$repo/testdata/sample.eml" "$repo/testdata/sample.eml"
+  expect 1 "${run[@]}" check --offline "$repo/conformance/messages/signed.eml"
+  expect 2 "${run[@]}" check --offline "$repo/testdata/sample.eml"
+  expect 64 "${run[@]}" check
+  expect 70 env SENDSCORE_LAUNCHED=1 "${run[@]}" --version
+  got=$("${run[@]}" check --offline --json - < "$repo/testdata/sample.eml") || true
+  want=$("${run[@]}" check --offline --json "$repo/testdata/sample.eml") || true
+  if [ -z "$got" ] || [ "$got" != "$want" ]; then
+    echo "stdin gave a different report" >&2
+    exit 1
+  fi
+}
+
+cd "$tmp/npm"
+command_checks npx --no-install sendscore
+cd "$repo"
+
 python=$(command -v python3 || command -v python)
 "$python" -m venv "$tmp/venv"
 venv_python="$tmp/venv/bin/python"
@@ -47,5 +79,8 @@ path = Path(find_binary())
 if path.parent.name != "_bin":
     raise SystemExit(f"used {path}")
 print(f"Python uses {path}")'
+venv_command="$tmp/venv/bin/sendscore"
+[ -x "$venv_command" ] || venv_command="$tmp/venv/Scripts/sendscore.exe"
+command_checks "$venv_command"
 cd "$repo/packages/python/tests"
 "$venv_python" -m unittest test_conformance
