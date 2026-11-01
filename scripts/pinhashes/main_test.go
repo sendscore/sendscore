@@ -9,14 +9,14 @@ import (
 	"testing"
 )
 
-const release = "../../conformance/release"
+const fixtures = "../../conformance/release"
 
 func TestFixturePinsAreCurrent(t *testing.T) {
-	got, err := read(filepath.Join(release, "good"))
+	got, err := read(filepath.Join(fixtures, "good"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(release, "pins.json"))
+	raw, err := os.ReadFile(filepath.Join(fixtures, "pins.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +31,12 @@ func TestFixturePinsAreCurrent(t *testing.T) {
 
 func TestChangedArchiveIsRefused(t *testing.T) {
 	dir := t.TempDir()
-	entries, err := os.ReadDir(filepath.Join(release, "good"))
+	entries, err := os.ReadDir(filepath.Join(fixtures, "good"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, e := range entries {
-		b, err := os.ReadFile(filepath.Join(release, "good", e.Name()))
+		b, err := os.ReadFile(filepath.Join(fixtures, "good", e.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -53,7 +53,7 @@ func TestChangedArchiveIsRefused(t *testing.T) {
 }
 
 func TestRenderedPinsHoldEveryHash(t *testing.T) {
-	pins, err := read(filepath.Join(release, "good"))
+	pins, err := read(filepath.Join(fixtures, "good"))
 	if err != nil {
 		t.Fatal(err)
 	}

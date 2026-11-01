@@ -10,26 +10,19 @@
 package main
 
 import (
-	"archive/tar"
-	"archive/zip"
 	"bufio"
-	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-)
 
-var platforms = []string{"darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64", "windows_amd64", "windows_arm64"}
+	"github.com/sendscore/sendscore/scripts/internal/release"
+)
 
 type pin struct {
 	Archive string `json:"archive"`
@@ -37,49 +30,6 @@ type pin struct {
 }
 
 var archiveName = regexp.MustCompile(`^sendscore_(.+)_(\w+_\w+)\.(tar\.gz|zip)$`)
-
-func sum(b []byte) string {
-	s := sha256.Sum256(b)
-	return hex.EncodeToString(s[:])
-}
-
-func extract(archive []byte, name string) ([]byte, error) {
-	exe := "sendscore"
-	if strings.HasSuffix(name, ".zip") {
-		z, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
-		if err != nil {
-			return nil, err
-		}
-		for _, f := range z.File {
-			if f.Name == exe+".exe" {
-				r, err := f.Open()
-				if err != nil {
-					return nil, err
-				}
-				defer r.Close()
-				return io.ReadAll(r)
-			}
-		}
-		return nil, fmt.Errorf("%s has no binary", name)
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		return nil, err
-	}
-	t := tar.NewReader(gz)
-	for {
-		h, err := t.Next()
-		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("%s has no binary", name)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if h.Name == exe && h.Typeflag == tar.TypeReg {
-			return io.ReadAll(t)
-		}
-	}
-}
 
 // read checks each archive against checksums.txt and hashes what is inside.
 func read(dir string) (map[string]pin, error) {
@@ -108,19 +58,19 @@ func read(dir string) (map[string]pin, error) {
 		if err != nil {
 			return nil, err
 		}
-		if sum(archive) != strings.ToLower(parts[0]) {
+		if release.Sum(archive) != strings.ToLower(parts[0]) {
 			return nil, fmt.Errorf("%s does not match checksums.txt", parts[1])
 		}
-		binary, err := extract(archive, parts[1])
+		binary, err := release.Extract(archive, parts[1])
 		if err != nil {
 			return nil, err
 		}
-		pins[m[2]] = pin{Archive: strings.ToLower(parts[0]), Binary: sum(binary)}
+		pins[m[2]] = pin{Archive: strings.ToLower(parts[0]), Binary: release.Sum(binary)}
 	}
 	if err := s.Err(); err != nil {
 		return nil, err
 	}
-	for _, p := range platforms {
+	for _, p := range release.Platforms {
 		if _, ok := pins[p]; !ok {
 			return nil, fmt.Errorf("checksums.txt has no %s", p)
 		}
