@@ -8,6 +8,8 @@ Not published yet.
 pip install sendscore
 ```
 
+It also gives you the `sendscore` command, which takes the same arguments and exit codes as the CLI. To install only the command, use `pipx install sendscore`.
+
 ```python
 from sendscore import check, diff
 

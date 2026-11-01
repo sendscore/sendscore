@@ -11,6 +11,9 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.scripts]
+sendscore = "sendscore._cli:main"
+
 [project.urls]
 Homepage = "https://github.com/sendscore/sendscore"
 

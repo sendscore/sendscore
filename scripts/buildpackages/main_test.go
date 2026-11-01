@@ -176,6 +176,9 @@ func TestWheel(t *testing.T) {
 			t.Errorf("binary mode %v", f.Mode())
 		}
 	}
+	if !strings.Contains(files["sendscore-1.2.3.dist-info/entry_points.txt"], "sendscore = sendscore._cli:main") {
+		t.Errorf("the wheel has no sendscore command: %v", files)
+	}
 	if files["sendscore/_bin/sendscore"] != "binary" || files["sendscore/__init__.py"] == "" {
 		t.Error("the wheel is missing the binary or the code")
 	}

@@ -320,6 +320,7 @@ func wheel(root, out, version, platform string, binary []byte) error {
 	files = append(files,
 		wheelFile{info + "METADATA", []byte(metadata), 0o644},
 		wheelFile{info + "WHEEL", []byte(wheelInfo), 0o644},
+		wheelFile{info + "entry_points.txt", []byte("[console_scripts]\nsendscore = sendscore._cli:main\n"), 0o644},
 		wheelFile{info + "licenses/LICENSE", license, 0o644})
 
 	var record strings.Builder
