@@ -165,17 +165,32 @@ def find_binary() -> str:
     from_env = os.environ.get("SENDSCORE_BIN")
     if from_env:
         return from_env
-    name = "sendscore.exe" if sys.platform == "win32" else "sendscore"
-    # A search of its own, because shutil.which looks in the current directory
-    # on Windows, and follows PATHEXT to .bat and .cmd files.
+    return on_path() or installed()
+
+
+def on_path() -> str | None:
+    """The pinned version on PATH, or None.
+
+    A search of its own, because shutil.which looks in the current directory
+    on Windows, and follows PATHEXT to .bat and .cmd files.
+    """
     for entry in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = os.path.join(entry, name)
+        candidate = os.path.join(entry, _exe_name())
         if os.path.isabs(entry) and _executable(candidate) and _right_version(candidate):
             return candidate
+    return None
+
+
+def _exe_name() -> str:
+    return "sendscore.exe" if sys.platform == "win32" else "sendscore"
+
+
+def installed(pins: dict[str, tuple[str, str]] = HASHES) -> str:
+    """The cached binary, or a download, as the pins allow."""
     target = current_platform()
-    pin = pin_for(*target)
+    pin = pin_for(*target, pins)
     directory = _cache_root() / "sendscore" / ENGINE_VERSION
-    cached = directory / name
+    cached = directory / _exe_name()
     if matches_pin(cached, pin):
         return str(cached)
     return str(download(ENGINE_VERSION, f"{RELEASES}/v{ENGINE_VERSION}", directory, pin, target))

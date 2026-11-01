@@ -9,7 +9,7 @@ from unittest import mock
 
 import sendscore
 from sendscore import ENGINE_VERSION, KILLED, SendScoreError, check, diff
-from sendscore._binary import find_binary
+from sendscore._binary import find_binary, installed, on_path
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE = REPO / "conformance" / "messages" / "clean.eml"
@@ -71,8 +71,12 @@ class Cli(unittest.TestCase):
 
     def test_wrong_version_on_path_is_not_run(self):
         self.fake("version-9.9.9")
-        with self.only_path(str(self.tmp / "version-9.9.9")), self.assertRaisesRegex(SendScoreError, "no pinned hash"):
-            find_binary()
+        with self.only_path(str(self.tmp / "version-9.9.9")):
+            self.assertIsNone(on_path())
+
+    def test_with_no_pins_nothing_is_installed(self):
+        with self.assertRaisesRegex(SendScoreError, "no pinned hash"):
+            installed({})
 
     def test_pinned_version_on_path_is_used(self):
         path = self.fake(f"version-{ENGINE_VERSION}")
@@ -84,8 +88,8 @@ class Cli(unittest.TestCase):
         os.makedirs(name, exist_ok=True)
         try:
             shutil.copy2(self.fake(name), os.path.join(name, EXE))
-            with self.only_path(os.pathsep.join(["", name])), self.assertRaisesRegex(SendScoreError, "no pinned hash"):
-                find_binary()
+            with self.only_path(os.pathsep.join(["", name])):
+                self.assertIsNone(on_path())
         finally:
             shutil.rmtree(name)
 
