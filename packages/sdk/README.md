@@ -26,4 +26,6 @@ Pass `timeout` in milliseconds to `check` or `diff` to kill the CLI when it runs
 
 ## The binary
 
-The package uses `SENDSCORE_BIN`, then the CLI on `PATH` if its version matches, then your user cache. If none has it, the first call downloads the pinned release from GitHub. The package carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. `SENDSCORE_BIN` is your own choice, so its version is not checked. There is no install script.
+The binary installs with the package. `npm install sendscore` also installs one `@sendscore/cli-<os>-<arch>` package for your machine, through `optionalDependencies`, on macOS, Linux, and Windows, for x64 and arm64. Nothing runs at install time, and nothing is downloaded when you use it.
+
+The package uses `SENDSCORE_BIN`, then that bundled binary, then the CLI on `PATH` if its version matches, then your user cache. If you install with optional dependencies turned off, the first call downloads the pinned release from GitHub, and checks it against the SHA-256 values in the package before it runs anything, including a cached binary.

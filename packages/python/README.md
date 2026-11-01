@@ -26,4 +26,6 @@ Pass `timeout` in seconds to `check` or `diff` to kill the CLI when it runs out.
 
 ## The binary
 
-The package uses `SENDSCORE_BIN`, then the CLI on `PATH` if its version matches, then your user cache. If none has it, the first call downloads the pinned release from GitHub. The package carries the SHA-256 of each release file and of the binary inside it, and checks them before it runs anything, including a cached binary. `SENDSCORE_BIN` is your own choice, so its version is not checked. There is no install script.
+The binary installs with the package. `pip install sendscore` picks the wheel for your machine, on macOS 12 or later, Linux with glibc or musl, and Windows, for x64 and arm64. Nothing runs at install time, and nothing is downloaded when you use it. There is no source distribution, so a platform without a wheel gets a clear error from pip.
+
+The package uses `SENDSCORE_BIN`, then that bundled binary, then the CLI on `PATH` if its version matches, then your user cache. Running from a source checkout, which has no binary, the first call downloads the pinned release from GitHub, and checks it against the SHA-256 values in the package before it runs anything, including a cached binary.

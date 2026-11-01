@@ -41,11 +41,19 @@ A package trusts the SHA-256 values committed in its own hashes file, not `check
 
 4. Commit and push the hashes. The script refuses a file that does not match `checksums.txt`, and `TestPackagePins` checks that all eight packages agree.
 5. Publish the GitHub release, because packages download from it, and turn on immutable releases for the repository so its files cannot change afterward.
-6. Publish the packages from the commit with the hashes.
+6. Publish the packages from the commit with the hashes. For npm and PyPI, run the Publish packages workflow with the version.
+
+   ```sh
+   gh workflow run publish.yml -f version=0.3.0
+   ```
 
 ### Registries
 
-npm, PyPI, crates.io, RubyGems, NuGet, and Hex publish from their `packages/` directories.
+crates.io, RubyGems, NuGet, and Hex publish from their `packages/` directories.
+
+npm and PyPI carry the binary, so they publish what `scripts/buildpackages` makes from the release files, never `packages/sdk` or `packages/python` themselves. The script refuses an archive that does not match the committed hashes. It writes one `@sendscore/cli-<os>-<arch>` package per platform, the `sendscore` package that names them in `optionalDependencies`, and one wheel per platform. There is no source distribution, because it would have no binary. `-local` builds from a checkout for `scripts/test-bundled.sh`, and those files are never published.
+
+The workflow needs a GitHub environment named `release`, which should require a reviewer. PyPI needs a trusted publisher for `sendscore`, with the workflow `publish.yml` and that environment. npm can only trust a package that already exists, so the first publish needs a short-lived `NPM_TOKEN` secret in that environment, from a token that can publish `sendscore` and the `@sendscore` scope. After it, add `publish.yml` as the trusted publisher of all seven packages and delete the secret.
 
 Packagist reads `composer.json` from the root of a repository, so PHP needs a read-only split. Create `sendscore/sendscore-php`, push `packages/php` to it with `git subtree split --prefix packages/php`, tag each release there with the same version, and submit that repository to Packagist. `packages/php/.gitattributes` keeps tests out of the installed package.
 
