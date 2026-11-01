@@ -2,8 +2,6 @@
 
 A typed wrapper around the [SendScore](https://github.com/sendscore/sendscore) CLI, which checks a newsletter email before it goes out. Every language package runs the same binary, so they all return the same verdict.
 
-Not published yet.
-
 ```sh
 npm install sendscore
 ```
