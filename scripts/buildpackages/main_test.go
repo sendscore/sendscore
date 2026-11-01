@@ -59,24 +59,36 @@ func TestReleaseArchivesMustMatchTheirPins(t *testing.T) {
 	}
 }
 
-func TestPinsAreReadFromTheCommittedFile(t *testing.T) {
-	pins, err := readPins(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range release.Platforms {
-		if len(pins[p].archive) != 64 || len(pins[p].binary) != 64 {
-			t.Errorf("%s: %+v", p, pins[p])
-		}
-	}
+// The committed file is empty between the version commit and the hashes commit,
+// so this writes its own copy in the format pinhashes writes.
+func TestReadPins(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, filepath.FromSlash(hashesFile))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("export const HASHES = {};\n"), 0o644); err != nil {
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive, binary := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	body := "export const HASHES: Record<string, { archive: string; binary: string }> = {"
+	for _, p := range release.Platforms {
+		body += fmt.Sprintf("\n  %s: { archive: %q, binary: %q },", p, archive, binary)
+	}
+	write(body + "\n};\n")
+	pins, err := readPins(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	for _, p := range release.Platforms {
+		if pins[p].archive != archive || pins[p].binary != binary {
+			t.Errorf("%s: %+v", p, pins[p])
+		}
+	}
+	write("export const HASHES = {};\n")
 	if _, err := readPins(dir); err == nil {
 		t.Error("empty pins were accepted")
 	}
