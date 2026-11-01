@@ -23,7 +23,15 @@ final class Binary
         if ($fromEnv !== false && $fromEnv !== '') {
             return $fromEnv;
         }
-        $exe = PHP_OS_FAMILY === 'Windows' ? 'sendscore.exe' : 'sendscore';
+        return self::onPath() ?? self::installed();
+    }
+
+    /**
+     * The pinned version on PATH, or null.
+     */
+    public static function onPath(): ?string
+    {
+        $exe = self::exeName();
         foreach (explode(PATH_SEPARATOR, (string) getenv('PATH')) as $dir) {
             $path = $dir . DIRECTORY_SEPARATOR . $exe;
             $runnable = is_file($path) && (PHP_OS_FAMILY === 'Windows' || is_executable($path));
@@ -31,13 +39,29 @@ final class Binary
                 return $path;
             }
         }
+        return null;
+    }
+
+    /**
+     * The cached binary, or a download, as the pins allow.
+     *
+     * @param array<string, array{0: string, 1: string}> $pins
+     */
+    public static function installed(array $pins = Hashes::PINS): string
+    {
+        $exe = self::exeName();
         $target = self::platform();
-        $pin = self::pinFor($target[0], $target[1]);
+        $pin = self::pinFor($target[0], $target[1], $pins);
         $dir = self::cacheRoot() . '/sendscore/' . self::ENGINE_VERSION;
         if (self::matchesPin("$dir/$exe", $pin)) {
             return "$dir/$exe";
         }
         return self::download(self::ENGINE_VERSION, self::RELEASES . '/v' . self::ENGINE_VERSION, $dir, $pin, $target);
+    }
+
+    private static function exeName(): string
+    {
+        return PHP_OS_FAMILY === 'Windows' ? 'sendscore.exe' : 'sendscore';
     }
 
     private static function isAbsolute(string $path): bool

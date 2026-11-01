@@ -120,8 +120,14 @@ final class CliTest extends TestCase
     {
         $this->fake('version-9.9.9');
         $this->onlyPath(self::$tmp . '/version-9.9.9');
+        $this->assertNull(Binary::onPath());
+    }
+
+    public function testWithNoPinsNothingIsInstalled(): void
+    {
+        $this->expectException(SendScoreException::class);
         $this->expectExceptionMessage('no pinned hash');
-        Binary::find();
+        Binary::installed([]);
     }
 
     public function testThePinnedVersionOnPathIsUsed(): void
@@ -140,10 +146,7 @@ final class CliTest extends TestCase
         chmod("$mode/" . self::$exe, 0755);
         $this->onlyPath(PATH_SEPARATOR . $mode);
         try {
-            Binary::find();
-            $this->fail('expected no CLI to be found');
-        } catch (SendScoreException $e) {
-            $this->assertStringContainsString('no pinned hash', $e->getMessage());
+            $this->assertNull(Binary::onPath());
         } finally {
             unlink("$mode/" . self::$exe);
             rmdir($mode);
